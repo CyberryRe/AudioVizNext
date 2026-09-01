@@ -142,6 +142,8 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
 
   // 是否为「视频循环」clip（视频类型 + 有 transform）
   const isVideoLoop = !!selectedClip && selectedClip.type === 'video'
+  // 是否为「单次播放」音频 clip（仅可编辑关联的音乐，时长上限为歌曲完整时长）
+  const isSinglePlay = !!selectedClip && selectedClip.type === 'audio' && !!selectedClip.clampToSource
   const t = selectedClip?.transform
   // XY 关联（缩放联动）
   const [linkXY, setLinkXY] = useState(false)
@@ -198,12 +200,22 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
             <NumberSlider label="Y 位置" value={t?.y ?? 0} min={-0.5} max={0.5} step={0.005} onChange={(v) => setTransform({ y: v })} />
             <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>素材在画幅内移动，画幅（遮罩）固定不变。</div>
           </div>
+        ) : isSinglePlay ? (
+          <div>
+            {/* 关联音乐（唯一可编辑内容） */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>关联的音乐</div>
+            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => onBindAssetToClip(selectedClipId, id)} />
+            <div style={{ fontSize: 11, color: '#888', margin: '6px 0 8px' }}>从素材库拖动音频素材到上方槽位即可填充。</div>
+            <div style={{ fontSize: 11, color: '#888' }}>
+              单次播放音频：拖拽 Clip 尾部调整时长，最多到关联歌曲的完整时长为止。
+            </div>
+          </div>
         ) : (
           <div style={{ textAlign: 'center', color: 'var(--text-secondary)', paddingTop: 40 }}>
             <div style={{ marginBottom: 8 }}>已选中剪辑</div>
             <div style={{ color: 'var(--accent)' }}>{selectedClipName}</div>
             <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-faint)' }}>
-              该剪辑类型暂无可编辑参数（「视频循环」支持素材/缩放/位置）
+              该剪辑类型暂无可编辑参数（「视频循环」支持素材/缩放/位置，「单次播放」仅关联音乐）
             </div>
           </div>
         )}

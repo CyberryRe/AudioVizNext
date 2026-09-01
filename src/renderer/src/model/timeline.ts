@@ -83,6 +83,11 @@ export interface Clip {
   opacity?: number
   transform?: Transform
 
+  // 时长上限（帧）。命中该值时，拖拽尾部调整时长会被钳制在该值（如「单次播放」音频 clip 上限 = 关联歌曲完整时长）。
+  maxDurationFrames?: number
+  /** 该 clip 的时长受源素材时长上限约束（如「单次播放」）。 */
+  clampToSource?: boolean
+
   // 标志
   locked?: boolean
   disabled?: boolean
@@ -305,13 +310,16 @@ export function addAudioTrack(tracks: Track[], overrides?: Partial<Track>): { tr
   return { tracks: [...tracks, track], track }
 }
 
-/** 同轨调整 clip 时长：改变 durationFrames（至少 1 帧），右侧相邻 clip 不重叠。 */
+/** 同轨调整 clip 时长：改变 durationFrames（至少 1 帧），右侧相邻 clip 不重叠；且不超过 maxDurationFrames（若存在）。 */
 export function resizeClip(clips: Clip[], clipId: string, newDuration: number): Clip[] {
   const target = clips.find((c) => c.id === clipId)
   if (!target) return clips
 
-  // 最小 1 帧，最大不超过右侧相邻 clip 的起点
+  // 最小 1 帧，最大不超过右侧相邻 clip 的起点，且不超过 clip 的时长上限
   let dur = Math.max(1, Math.round(newDuration))
+  if (target.maxDurationFrames != null) {
+    dur = Math.min(dur, target.maxDurationFrames)
+  }
   const rightNeighbor = clips
     .filter((c) => c.id !== clipId && c.startFrame >= target.startFrame)
     .sort((a, b) => a.startFrame - b.startFrame)[0]
@@ -359,13 +367,25 @@ export function bindAssetToClip(
 
   // 未绑定素材的模板位 clip → 时长随素材、并落素材名
   const isTemplate = !clip.assetId
+
+  // 「单次播放」类 clip：时长上限 = 源素材完整时长；绑定后时长被钳制在该上限内
+  let maxDurationFrames = clip.maxDurationFrames
+  let durationFrames = clip.durationFrames
+  if (clip.clampToSource && assetFrames) {
+    maxDurationFrames = assetFrames
+    durationFrames = Math.min(durationFrames, assetFrames)
+  } else if (isTemplate && assetFrames) {
+    // 普通模板位（如视频循环）→ 时长对齐源素材
+    durationFrames = assetFrames
+  }
+
   const next: Clip = {
     ...clip,
     src,
     assetId: asset.id,
     name: isTemplate ? asset.name : clip.name,
-    // 模板位 → 时长对齐素材；已绑定过的则保留用户调整过的时长
-    durationFrames: isTemplate && assetFrames ? assetFrames : clip.durationFrames,
+    durationFrames,
+    maxDurationFrames,
     sourceDurationFrames: isTemplate && assetFrames ? assetFrames : clip.sourceDurationFrames,
     sourceStartFrame: clip.sourceStartFrame ?? 0
   }

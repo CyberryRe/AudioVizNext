@@ -84,6 +84,8 @@ export interface EffectTemplate {
   desc?: string
   /** 默认变换（视频循环等 clip 自带变换参数） */
   transform?: Transform
+  /** 「单次播放」类 clip：时长受关联源素材完整时长上限约束（拖尾拉满即停）。 */
+  clampToSource?: boolean
 }
 
 /**
@@ -119,7 +121,12 @@ export function createEffectCategories(): EffectCategory[] {
       icon: '♪',
       items: [
         { id: 'tpl-audio-music', name: '背景音乐', kind: 'audio', clipType: 'audio', durationFrames: 30 * 8, color: '#2a7a3a' },
-        { id: 'tpl-audio-vo', name: '画外音', kind: 'audio', clipType: 'audio', durationFrames: 30 * 6, color: '#2a7a3a' }
+        { id: 'tpl-audio-vo', name: '画外音', kind: 'audio', clipType: 'audio', durationFrames: 30 * 6, color: '#2a7a3a' },
+        {
+          id: 'tpl-audio-single', name: '单次播放', kind: 'audio', clipType: 'audio', durationFrames: 30 * 5, color: '#1e6a6a',
+          clampToSource: true,
+          desc: '单次播放音频：仅可编辑关联的音乐，时长上限为歌曲完整时长'
+        }
       ]
     },
     {
@@ -153,6 +160,9 @@ export function clipFromTemplate(tpl: EffectTemplate, trackId: string): ReturnTy
     src: undefined,
     content: tpl.clipType === 'text' ? (tpl.desc ?? tpl.name) : undefined,
     transform: tpl.transform,
-    opacity: 1
+    opacity: 1,
+    // 「单次播放」类：标记时长受源素材上限约束
+    clampToSource: tpl.clampToSource,
+    maxDurationFrames: tpl.clampToSource ? tpl.durationFrames : undefined
   })
 }

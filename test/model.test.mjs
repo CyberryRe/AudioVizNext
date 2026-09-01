@@ -3,7 +3,15 @@
  * 验证 resolveTimeline / 不变量 / 排序等核心逻辑。
  * 运行：node test/model.test.mjs
  */
-import { createProject, createTrack, createClip, sortClips, resolveTimeline } from '../src/renderer/src/model/timeline.ts'
+import {
+  createProject,
+  createTrack,
+  createClip,
+  sortClips,
+  resolveTimeline,
+  resizeClip,
+  bindAssetToClip
+} from '../src/renderer/src/model/timeline.ts'
 
 let pass = 0
 let fail = 0
@@ -121,6 +129,44 @@ t('disabled 轨道跳过', () => {
   p2.tracks.find((t) => t.id === 'v1').disabled = true
   const s = resolveTimeline(0, p2)
   eq(s.videos.length, 0, 'disabled 轨道无视频')
+})
+
+console.log('== resizeClip 时长上限（单次播放） ==')
+t('无上限时 resize 自由', () => {
+  const clips = sortClips([createClip({ id: 'c1', type: 'audio', startFrame: 0, durationFrames: 30 })])
+  const next = resizeClip(clips, 'c1', 120)
+  eq(next[0].durationFrames, 120, '无 maxDurationFrames 可拉长')
+})
+t('有 maxDurationFrames 时 resize 被钳制', () => {
+  const clips = sortClips([createClip({ id: 'c1', type: 'audio', startFrame: 0, durationFrames: 30, maxDurationFrames: 60 })])
+  const next = resizeClip(clips, 'c1', 500)
+  eq(next[0].durationFrames, 60, '拖到尾拉不过 60 帧')
+})
+t('maxDurationFrames 内可自由调整', () => {
+  const clips = sortClips([createClip({ id: 'c1', type: 'audio', startFrame: 0, durationFrames: 30, maxDurationFrames: 60 })])
+  const next = resizeClip(clips, 'c1', 45)
+  eq(next[0].durationFrames, 45, '上限内可设 45')
+})
+
+console.log('== bindAssetToClip 单次播放钳制 ==')
+t('clampToSource 绑定后时长钳制到源时长', () => {
+  const asset = { id: 'a1', kind: 'audio', name: 'song.mp3', src: 'x.mp3', durationSec: 2, byteSize: 1, addedAt: 0 }
+  const clip = createClip({ id: 'c1', type: 'audio', clampToSource: true, durationFrames: 30, maxDurationFrames: 30 })
+  const next = bindAssetToClip(clip, asset)
+  // 2 秒 × 30fps = 60 帧；模板位 30 帧 → 被钳制为 min(30,60)=30
+  eq(next.durationFrames, 30, '默认时长 30 < 源 60，保持 30')
+  eq(next.maxDurationFrames, 60, 'maxDurationFrames = 源 60')
+  // 再 resize 到 100 → 被钳制到 60
+  const resized = resizeClip([next], 'c1', 100)
+  eq(resized[0].durationFrames, 60, '拖尾最多到歌曲完整时长 60')
+})
+t('clampToSource 绑定后源更短则收紧', () => {
+  const asset = { id: 'a1', kind: 'audio', name: 'short.mp3', src: 'x.mp3', durationSec: 1, byteSize: 1, addedAt: 0 }
+  const clip = createClip({ id: 'c1', type: 'audio', clampToSource: true, durationFrames: 90, maxDurationFrames: 90 })
+  const next = bindAssetToClip(clip, asset)
+  // 1 秒 × 30 = 30 帧 < 90 → 收紧为 30
+  eq(next.durationFrames, 30, '时长收紧到源 30')
+  eq(next.maxDurationFrames, 30, 'maxDurationFrames = 30')
 })
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

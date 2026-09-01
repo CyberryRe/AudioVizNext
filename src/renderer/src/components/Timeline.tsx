@@ -186,28 +186,14 @@ export default function Timeline({
     ;(window as unknown as Record<string, unknown>)._avsPendingDrag = undefined
   }
 
-  // 由全局 Y 推断落点轨道 id（跨区，考虑顶部工具条偏移）
+  // 由全局 Y 推断落点轨道 id（跨区，直接查询实际渲染的轨道行，天然兼容共享滚动）
   const trackIdAtY = (clientY: number): string | undefined => {
-    const el = hScrollRef.current
-    if (!el) return undefined
-    const rect = el.getBoundingClientRect()
-    let y = clientY - rect.top
-    if (y < 0) return undefined
-
-    // 视频区
-    if (!videoCollapsed) {
-      y -= ZONE_HEADER_HEIGHT
-      const vIdx = Math.floor(y / TRACK_HEIGHT)
-      if (vIdx >= 0 && vIdx < videoTracks.length) return videoTracks[vIdx]?.id
-      y -= videoTracks.length * TRACK_HEIGHT
-    } else {
-      y -= ZONE_HEADER_HEIGHT
-    }
-    // 音频区
-    if (!audioCollapsed) {
-      y -= ZONE_HEADER_HEIGHT
-      const aIdx = Math.floor(y / TRACK_HEIGHT)
-      if (aIdx >= 0 && aIdx < audioTracks.length) return audioTracks[aIdx]?.id
+    const rows = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-zone][data-trackid]')
+    )
+    for (const row of rows) {
+      const r = row.getBoundingClientRect()
+      if (clientY >= r.top && clientY < r.bottom) return row.dataset.trackid ?? undefined
     }
     return undefined
   }
@@ -241,10 +227,16 @@ export default function Timeline({
         <span style={{ marginLeft: 'auto', opacity: 0.7 }}>Ctrl+滚轮 / − + 缩放 · ←→ 步进 · Del 删除</span>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: `${TRACK_CONTROL_WIDTH}px 1fr`, position: 'relative' }}>
-        {/* ===== 左侧：轨道控制（固定，不随横向滚动） ===== */}
-        <div style={{ background: 'var(--bg-track-controls)', borderRight: '1px solid var(--border-dark)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ height: RULER_HEIGHT, borderBottom: '1px solid var(--border-dark)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', gap: 8, fontSize: 12 }}>
+      {/* 纵向滚动统一放在网格容器上：左控制列与右内容列一起滚，天然对齐、绝不重叠 */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: `${TRACK_CONTROL_WIDTH}px 1fr`, minWidth: 0 }}>
+        {/* ===== 左侧：轨道控制（固定，不随横向滚动；纵向与右侧共享同一滚动） ===== */}
+        <div
+          style={{ background: 'var(--bg-track-controls)', borderRight: '1px solid var(--border-dark)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+          data-role="timeline-left"
+        >
+          {/* 顶部固定行：吸附/链接/设置 */}
+          <div style={{ height: RULER_HEIGHT, flex: 'none', borderBottom: '1px solid var(--border-dark)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', gap: 8, fontSize: 12, background: 'var(--bg-panel-head)' }}>
             <span title="吸附" style={{ cursor: 'pointer' }}>⚓</span>
             <span title="链接" style={{ cursor: 'pointer' }}>🔗</span>
             <span title="轨道设置" style={{ cursor: 'pointer' }}>🔧</span>
@@ -254,7 +246,7 @@ export default function Timeline({
           <ZoneControls zone="audio" tracks={audioTracks} collapsed={audioCollapsed} onToggleCollapse={() => setAudioCollapsed((c) => !c)} onToggleTrack={onToggleTrack} />
         </div>
 
-        {/* ===== 右侧：横向滚动容器（标尺 + 双区轨道行 一起横向滚动） ===== */}
+        {/* ===== 右侧：横向滚动容器（标尺 + 双区轨道行 一起横向滚动）；纵向滚动的滚动条由外层共享容器承担 ===== */}
         <div
           ref={hScrollRef}
           onScroll={onScroll}
@@ -263,7 +255,8 @@ export default function Timeline({
           onDragOver={handleDragOver}
           onDrop={handleDrop}
         >
-          <div style={{ position: 'relative', width: contentWidth, minWidth: '100%' }}>
+          {/* 内容宽度（至少撑满可视区）；高度由自然流内容决定，播放头覆盖全高 */}
+          <div style={{ position: 'relative', width: contentWidth, minWidth: '100%', minHeight: '100%' }}>
             <Ruler total={total} fps={fps} pxPerFrame={pxPerFrame} onSeek={onSeek} frameFromEvent={frameFromEvent} />
 
             {/* 视频区轨道行 */}
@@ -280,10 +273,9 @@ export default function Timeline({
               getAsset={getAsset}
               onSeek={onSeek}
               frameFromEvent={frameFromEvent}
-              topOffset={RULER_HEIGHT}
               collapsed={videoCollapsed}
             />
-            {/* 音频区轨道行 */}
+            {/* 音频区轨道行（自然流：紧接视频区下方，绝不重叠） */}
             <ZoneRows
               zone="audio"
               tracks={audioTracks}
@@ -297,7 +289,6 @@ export default function Timeline({
               getAsset={getAsset}
               onSeek={onSeek}
               frameFromEvent={frameFromEvent}
-              topOffset={RULER_HEIGHT + ZONE_HEADER_HEIGHT + (videoCollapsed ? 0 : videoTracks.length * TRACK_HEIGHT)}
               collapsed={audioCollapsed}
             />
 
@@ -319,6 +310,7 @@ export default function Timeline({
             </div>
           </div>
         </div>
+      </div>
       </div>
 
       {/* 底部工具栏 */}
@@ -379,7 +371,7 @@ function ZoneControls({ zone, tracks, collapsed, onToggleCollapse, onToggleTrack
   const label = zone === 'video' ? '视频轨道' : '音频轨道'
   const accent = zone === 'video' ? 'var(--track-video)' : 'var(--track-audio)'
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: collapsed ? '0 0 auto' : 1, minHeight: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 'none', minHeight: 0 }}>
       <div
         onClick={onToggleCollapse}
         style={{
@@ -403,13 +395,9 @@ function ZoneControls({ zone, tracks, collapsed, onToggleCollapse, onToggleTrack
         {label}
         <span style={{ marginLeft: 'auto', opacity: 0.6 }}>{tracks.length}</span>
       </div>
-      {!collapsed && (
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-          {tracks.map((track) => (
-            <TrackControlRow key={track.id} track={track} onToggleTrack={onToggleTrack} />
-          ))}
-        </div>
-      )}
+      {!collapsed && tracks.map((track) => (
+        <TrackControlRow key={track.id} track={track} onToggleTrack={onToggleTrack} />
+      ))}
     </div>
   )
 }
@@ -455,8 +443,8 @@ function TrackControlRow({ track, onToggleTrack }: {
   )
 }
 
-/** 右侧某分区轨道行（纵向独立滚动，横向随父容器滚动）。topOffset = 区内 Y 起点。collapsed 时只显示折叠头。 */
-function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectClip, onMoveClip, onResizeClip, onMoveClipAcrossTracks, getAsset, onSeek, frameFromEvent, topOffset, collapsed }: {
+/** 右侧某分区轨道行（自然流：紧跟上一个分区之后，高度 = 折叠头 + 各轨行，绝不重叠/侵入其它区）。collapsed 时只显示折叠头。 */
+function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectClip, onMoveClip, onResizeClip, onMoveClipAcrossTracks, getAsset, onSeek, frameFromEvent, collapsed }: {
   zone: TrackZone
   tracks: Track[]
   clips: Record<string, Clip[]>
@@ -469,11 +457,8 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
   getAsset: (id: string) => MediaAsset | undefined
   onSeek: (f: number) => void
   frameFromEvent: (clientX: number) => number
-  topOffset: number
   collapsed?: boolean
 }): React.JSX.Element {
-  const zoneHeight = collapsed ? ZONE_HEADER_HEIGHT : ZONE_HEADER_HEIGHT + tracks.length * TRACK_HEIGHT
-
   // 跨轨拖动的目标解析：由 Y 坐标找所在轨道行（同区）。
   const resolveTargetByY = (clientY: number): { trackId: string | null; isNewTop: boolean } => {
     const rows = Array.from(
@@ -495,18 +480,14 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
 
   return (
     <div
+      data-zone={zone}
       style={{
-        position: 'absolute',
-        left: 0,
-        right: 0,
-        top: topOffset,
-        height: zoneHeight,
-        // 纵向独立滚动；横向隐藏（随父容器一起滚）
-        overflowY: 'auto',
-        overflowX: 'hidden'
+        width: '100%',
+        // 自然流：高度 = 折叠头 + 各轨行（展开）或仅折叠头（折叠）
+        background: 'var(--bg-timeline)'
       }}
     >
-      <div style={{ height: ZONE_HEADER_HEIGHT, borderBottom: '1px solid var(--border-row)', background: 'var(--bg-zone-header)', display: 'flex', alignItems: 'center', gap: 7, padding: '0 8px', color: '#888', fontSize: 11 }}>
+      <div style={{ height: ZONE_HEADER_HEIGHT, flex: 'none', borderBottom: '1px solid var(--border-row)', background: 'var(--bg-zone-header)', display: 'flex', alignItems: 'center', gap: 7, padding: '0 8px', color: '#888', fontSize: 11 }}>
         <span style={{ width: 8, height: 8, borderRadius: 2, background: zone === 'video' ? 'var(--track-video)' : 'var(--track-audio)' }} />
         {zone === 'video' ? '视频轨道区（拖到上方可自动新建视频轨）' : '音频轨道区'}
       </div>
