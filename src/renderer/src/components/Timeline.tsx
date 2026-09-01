@@ -1,5 +1,7 @@
-import type { Project, Clip, Track } from '../model/timeline'
+import { useRef } from 'react'
+import type { Project, Clip, Track, MediaAsset } from '../model/timeline'
 import { formatTimecode } from '../model/demo'
+import type { EffectTemplate } from '../model/demo'
 
 interface TimelineProps {
   project: Project
@@ -10,6 +12,10 @@ interface TimelineProps {
   onSeek: (frame: number) => void
   selectedClipId: string | null
   onSelectClip: (id: string | null) => void
+  onAddTemplate: (tpl: EffectTemplate, dropFrame: number, targetTrackId?: string) => void
+  onAddAssetClip: (asset: MediaAsset, dropFrame: number, targetTrackId?: string) => void
+  onToggleTrack: (trackId: string, prop: 'disabled' | 'muted' | 'solo' | 'locked') => void
+  getAsset: (id: string) => MediaAsset | undefined
 }
 
 /** 每帧的像素宽度 */
@@ -25,10 +31,39 @@ const TRACK_COLOR: Record<Track['kind'], string> = {
   text: 'var(--track-text)'
 }
 
+/** 读取拖拽 payload（自定义 MIME + 兜底 stash） */
+function readDragPayload(e: React.DragEvent): { template?: EffectTemplate; assetId?: string } | null {
+  // 优先自定义 MIME
+  try {
+    const raw = e.dataTransfer.getData('application/x-avn-template')
+    if (raw) {
+      const p = JSON.parse(raw)
+      if (p.template) return { template: p.template }
+    }
+  } catch { /* ignore */ }
+  try {
+    const raw = e.dataTransfer.getData('application/x-avn-asset')
+    if (raw) {
+      const p = JSON.parse(raw)
+      if (p.assetId) return { assetId: p.assetId }
+    }
+  } catch { /* ignore */ }
+  // 兜底 stash
+  const stash = (window as unknown as Record<string, unknown>)._avsPendingDrag as
+    | { type: 'template'; template: EffectTemplate }
+    | { type: 'asset'; assetId: string }
+    | undefined
+  if (stash) {
+    if (stash.type === 'template') return { template: stash.template }
+    if (stash.type === 'asset') return { assetId: stash.assetId }
+  }
+  return null
+}
+
 /**
  * 中下：时间轴。
  * 轨道控制（左）+ 标尺 + 轨道行 + 播放头。
- * clip 块按 startFrame/durationFrames × PX_PER_FRAME 定位。
+ * 支持：点击定位、播放头拖动、拖拽模板/素材落轨。
  */
 export default function Timeline({
   project,
@@ -38,32 +73,99 @@ export default function Timeline({
   onPlay,
   onSeek,
   selectedClipId,
-  onSelectClip
+  onSelectClip,
+  onAddTemplate,
+  onAddAssetClip,
+  onToggleTrack,
+  getAsset
 }: TimelineProps): React.JSX.Element {
   const fps = project.fps
   const totalPx = total * PX_PER_FRAME
+  const timeAreaRef = useRef<HTMLDivElement>(null)
+
+  // 由鼠标事件计算帧
+  const frameFromEvent = (clientX: number): number => {
+    const el = timeAreaRef.current
+    if (!el) return 0
+    const rect = el.getBoundingClientRect()
+    return Math.max(0, Math.round((clientX - rect.left) / PX_PER_FRAME))
+  }
 
   const handleTimelineClick = (e: React.MouseEvent): void => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const frame = Math.max(0, Math.round(x / PX_PER_FRAME))
-    onSeek(frame)
+    onSeek(frameFromEvent(e.clientX))
+  }
+
+  // 播放头拖动
+  const handlePlayheadDrag = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    const seek = (ev: MouseEvent): void => onSeek(frameFromEvent(ev.clientX))
+    const up = (): void => {
+      window.removeEventListener('mousemove', seek)
+      window.removeEventListener('mouseup', up)
+      document.body.style.cursor = ''
+    }
+    window.addEventListener('mousemove', seek)
+    window.addEventListener('mouseup', up)
+    document.body.style.cursor = 'ew-resize'
+  }
+
+  // 拖拽落轨
+  const handleDragOver = (e: React.DragEvent): void => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+  }
+
+  const handleDrop = (e: React.DragEvent): void => {
+    e.preventDefault()
+    e.stopPropagation()
+    const payload = readDragPayload(e)
+    if (!payload) return
+    const dropFrame = frameFromEvent(e.clientX)
+
+    // 由落点 y 推断目标轨道
+    const el = timeAreaRef.current
+    let targetTrackId: string | undefined
+    if (el) {
+      const rect = el.getBoundingClientRect()
+      const relY = e.clientY - rect.top - RULER_HEIGHT
+      const idx = Math.floor(relY / TRACK_HEIGHT)
+      const track = project.tracks[idx]
+      if (track) targetTrackId = track.id
+    }
+
+    if (payload.template) {
+      onAddTemplate(payload.template, dropFrame, targetTrackId)
+    } else if (payload.assetId) {
+      const asset = getAsset(payload.assetId)
+      if (asset) onAddAssetClip(asset, dropFrame, targetTrackId)
+    }
+    // 清空兜底
+    ;(window as unknown as Record<string, unknown>)._avsPendingDrag = undefined
+  }
+
+  // 轨道空行点击：定位播放头
+  const handleTrackClick = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    onSeek(frameFromEvent(e.clientX))
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div className="tabline">
         <span className="tab active">序列 01</span>
-        <span style={{ marginLeft: 'auto', color: '#888' }}>☰</span>
+        <span style={{ marginLeft: 'auto', color: '#888', cursor: 'pointer', fontSize: 14 }} title="时间轴设置">☰</span>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: `${TRACK_CONTROL_WIDTH}px 1fr`, position: 'relative' }}>
         {/* ===== 轨道控制（左） ===== */}
         <div style={{ background: 'var(--bg-track-controls)', borderRight: '1px solid var(--border-dark)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ height: RULER_HEIGHT, borderBottom: '1px solid var(--border-dark)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
-            ▣ ▣ ▾ 🔧
+          <div style={{ height: RULER_HEIGHT, borderBottom: '1px solid var(--border-dark)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', gap: 8, fontSize: 12 }}>
+            <span title="添加轨道" style={{ cursor: 'pointer' }}>▣</span>
+            <span title="吸附" style={{ cursor: 'pointer' }}>⚓</span>
+            <span title="链接" style={{ cursor: 'pointer' }}>🔗</span>
+            <span title="轨道设置" style={{ cursor: 'pointer' }}>🔧</span>
           </div>
-          <div style={{ paddingTop: 7, flex: 1 }}>
+          <div style={{ paddingTop: 7, flex: 1, overflow: 'auto' }}>
             {project.tracks.map((track) => (
               <div
                 key={track.id}
@@ -73,7 +175,7 @@ export default function Timeline({
                   style={{
                     width: 29,
                     height: 29,
-                    background: TRACK_COLOR[track.kind],
+                    background: track.kind === 'audio' ? (track.muted ? '#5a5a5a' : TRACK_COLOR[track.kind]) : TRACK_COLOR[track.kind],
                     borderRadius: 3,
                     display: 'flex',
                     alignItems: 'center',
@@ -85,8 +187,50 @@ export default function Timeline({
                 >
                   {track.name}
                 </div>
-                <div style={{ color: '#8e8e8e', display: 'flex', gap: 9 }}>
-                  {track.kind === 'audio' ? '▱ M S ♟' : '▱ ◉ ◌'}
+                <div style={{ color: '#8e8e8e', display: 'flex', gap: 6, fontSize: 13, alignItems: 'center' }}>
+                  {/* 可见性 */}
+                  <span
+                    title={track.disabled ? '启用轨道' : '禁用轨道'}
+                    onClick={() => onToggleTrack(track.id, 'disabled')}
+                    style={{ cursor: 'pointer', color: track.disabled ? '#5a5a5a' : '#9e9e9e', opacity: track.disabled ? 0.45 : 1 }}
+                  >
+                    ▱
+                  </span>
+                  {track.kind === 'audio' ? (
+                    <>
+                      <span
+                        title="静音"
+                        onClick={() => onToggleTrack(track.id, 'muted')}
+                        style={{ cursor: 'pointer', fontWeight: 700, color: track.muted ? '#e05c5c' : '#8e8e8e' }}
+                      >
+                        M
+                      </span>
+                      <span
+                        title="独奏"
+                        onClick={() => onToggleTrack(track.id, 'solo')}
+                        style={{ cursor: 'pointer', fontWeight: 700, color: track.solo ? '#e0b34c' : '#8e8e8e' }}
+                      >
+                        S
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span
+                        title="独奏"
+                        onClick={() => onToggleTrack(track.id, 'solo')}
+                        style={{ cursor: 'pointer', fontWeight: 700, color: track.solo ? '#e0b34c' : '#8e8e8e' }}
+                      >
+                        ◉
+                      </span>
+                      <span
+                        title="锁定"
+                        onClick={() => onToggleTrack(track.id, 'locked')}
+                        style={{ cursor: 'pointer', color: track.locked ? '#e0b34c' : '#8e8e8e' }}
+                      >
+                        ◌
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
             ))}
@@ -95,8 +239,11 @@ export default function Timeline({
 
         {/* ===== 时间区（标尺 + 轨道行） ===== */}
         <div
+          ref={timeAreaRef}
           style={{ overflow: 'hidden', position: 'relative', background: 'var(--bg-timeline)', cursor: 'crosshair' }}
           onClick={handleTimelineClick}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
         >
           {/* 标尺 */}
           <div
@@ -113,7 +260,7 @@ export default function Timeline({
               return (
                 <span
                   key={i}
-                  style={{ position: 'absolute', top: 4, left, color: '#aaa', fontSize: 11, whiteSpace: 'nowrap' }}
+                  style={{ position: 'absolute', top: 4, left, color: '#aaa', fontSize: 11, whiteSpace: 'nowrap', cursor: 'crosshair' }}
                 >
                   {formatTimecode(i * fps, fps)}
                 </span>
@@ -124,7 +271,11 @@ export default function Timeline({
           {/* 轨道行 */}
           <div style={{ position: 'absolute', left: 0, right: 0, top: RULER_HEIGHT, bottom: 0, overflow: 'hidden' }}>
             {project.tracks.map((track) => (
-              <div key={track.id} style={{ height: TRACK_HEIGHT, borderBottom: '1px solid var(--border-row)', position: 'relative' }}>
+              <div
+                key={track.id}
+                style={{ height: TRACK_HEIGHT, borderBottom: '1px solid var(--border-row)', position: 'relative' }}
+                onClick={handleTrackClick}
+              >
                 {(project.clips[track.id] ?? []).map((clip) => (
                   <ClipBlock
                     key={clip.id}
@@ -139,8 +290,9 @@ export default function Timeline({
             ))}
           </div>
 
-          {/* 播放头 */}
+          {/* 播放头（可拖动） */}
           <div
+            onMouseDown={handlePlayheadDrag}
             style={{
               position: 'absolute',
               top: 0,
@@ -149,7 +301,7 @@ export default function Timeline({
               background: 'var(--accent-playhead)',
               left: playheadFrame * PX_PER_FRAME,
               zIndex: 4,
-              pointerEvents: 'none'
+              cursor: 'ew-resize'
             }}
           >
             <div
@@ -159,22 +311,28 @@ export default function Timeline({
                 left: -4,
                 borderLeft: '5px solid transparent',
                 borderRight: '5px solid transparent',
-                borderTop: '9px solid #18a8ff'
+                borderTop: '9px solid #18a8ff',
+                cursor: 'ew-resize'
               }}
             />
           </div>
 
           {/* 宽度占位（让内容可横向滚动） */}
-          <div style={{ position: 'absolute', left: 0, top: RULER_HEIGHT, width: Math.max(totalPx, '100%' as never), height: 1 }} />
+          <div style={{ position: 'absolute', left: 0, top: RULER_HEIGHT, width: Math.max(totalPx, 1), height: 1 }} />
         </div>
       </div>
 
       {/* 底部工具栏 */}
       <div style={{ height: 30, flex: 'none', background: 'var(--bg-tabline)', borderTop: '1px solid var(--border-dark)', display: 'flex', alignItems: 'center', gap: 14, padding: '0 12px', color: 'var(--text-muted)' }}>
         <span style={{ color: 'var(--accent-playhead)', fontWeight: 600 }}>{formatTimecode(playheadFrame, fps)}</span>
-        <span style={{ cursor: 'pointer' }} onClick={() => onPlay(!isPlaying)}>{isPlaying ? '⏸' : '▶'}</span>
-        <span style={{ cursor: 'pointer' }} onClick={() => onSeek(0)}>⏮</span>
-        <span style={{ marginLeft: 'auto' }}>▣ Ⅱ ▶ ⌄ 🔧 CC</span>
+        <span style={{ cursor: 'pointer', fontSize: 14 }} onClick={() => onPlay(!isPlaying)} title="播放/暂停">
+          {isPlaying ? '⏸' : '▶'}
+        </span>
+        <span style={{ cursor: 'pointer', fontSize: 14 }} onClick={() => onSeek(0)} title="回到起点">⏮</span>
+        <span style={{ cursor: 'pointer', fontSize: 14 }} onClick={() => onSeek(playheadFrame + fps)} title="下一帧片段">⏭</span>
+        <span style={{ marginLeft: 'auto', fontSize: 12, opacity: 0.7 }}>
+          ▣ Ⅱ ▶ ⌄ 🔧 CC
+        </span>
       </div>
     </div>
   )

@@ -188,6 +188,70 @@ export function createClip(overrides?: Partial<Clip>): Clip {
   }
 }
 
+// ===== 纯逻辑操作（供 UI/拖拽调用，保持不变量） =====
+
+/** 给定目标轨道与落点帧，返回在该轨可容纳的插入帧（避免重叠）。 */
+export function findInsertionFrame(clips: Clip[], dropFrame: number): number {
+  let best = dropFrame
+  for (const c of clips) {
+    const start = c.startFrame
+    const end = c.startFrame + c.durationFrames
+    // 落点落在某个 clip 区间内 → 挪到该 clip 结束位置
+    if (dropFrame >= start && dropFrame < end) {
+      best = end
+      break
+    }
+  }
+  return Math.max(0, best)
+}
+
+/**
+ * 向某轨添加一个 clip（先排序校验不变量）。
+ * 返回新的 clips 数组（不可变）。若与既有 clip 重叠，自动推到末尾。
+ */
+export function addClipToTrack(
+  clips: Clip[],
+  newClip: Clip,
+  pushForward = false
+): Clip[] {
+  let insertFrame = pushForward ? findInsertionFrame(clips, newClip.startFrame) : newClip.startFrame
+  const candidate = { ...newClip, startFrame: insertFrame }
+  const merged = [...clips, candidate]
+  try {
+    return sortClips(merged)
+  } catch {
+    // 仍冲突（理论上不会，除非 duration 异常）→ 追加到轨末尾
+    const end = clips.reduce((m, c) => Math.max(m, c.startFrame + c.durationFrames), 0)
+    return sortClips([...clips, { ...candidate, startFrame: end }])
+  }
+}
+
+/** 依据文件扩展名推断素材类型。 */
+export function kindFromFileName(name: string): MediaAsset['kind'] {
+  const ext = name.split('.').pop()?.toLowerCase() ?? ''
+  if (['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v'].includes(ext)) return 'video'
+  if (['mp3', 'wav', 'flac', 'm4a', 'ogg', 'aac'].includes(ext)) return 'audio'
+  if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) return 'image'
+  return 'image'
+}
+
+/** 从 File 对象构造 MediaAsset（本地拖入素材库）。 */
+export function assetFromFile(file: File, index = 0): MediaAsset {
+  const kind = kindFromFileName(file.name)
+  const now = Date.now()
+  return {
+    id: `asset-${now.toString(36)}-${index}-${Math.random().toString(36).slice(2, 6)}`,
+    kind,
+    name: file.name,
+    src: URL.createObjectURL(file), // 本地 blob 预览（图片缩略图可用）
+    durationSec: 0,
+    width: kind === 'image' ? 320 : undefined,
+    height: kind === 'image' ? 180 : undefined,
+    byteSize: file.size,
+    addedAt: now
+  }
+}
+
 // ===== 不变量校验 =====
 
 /**

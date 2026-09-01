@@ -1,5 +1,21 @@
-import { app, shell, BrowserWindow } from 'electron'
+import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
+
+// ===== 窗口控制 IPC（标题栏自绘按钮 → 主进程） =====
+function registerWindowControls(): void {
+  ipcMain.on('win:minimize', (e) => {
+    BrowserWindow.fromWebContents(e.sender)?.minimize()
+  })
+  ipcMain.on('win:maximize', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win) return
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+  })
+  ipcMain.on('win:close', (e) => {
+    BrowserWindow.fromWebContents(e.sender)?.close()
+  })
+}
 
 /** 创建主窗口 */
 function createWindow(): void {
@@ -51,6 +67,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  registerWindowControls()
   createWindow()
 
   // macOS：点击 Dock 图标且无窗口时重新创建

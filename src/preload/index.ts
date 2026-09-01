@@ -1,4 +1,4 @@
-import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 
 /**
  * 通过 contextBridge 暴露给渲染进程的安全 API。
@@ -9,6 +9,12 @@ const api = {
     electron: process.versions.electron,
     node: process.versions.node,
     chrome: process.versions.chrome
+  },
+  /** 窗口控制（标题栏自绘按钮） */
+  window: {
+    minimize: (): void => ipcRenderer.send('win:minimize'),
+    maximize: (): void => ipcRenderer.send('win:maximize'),
+    close: (): void => ipcRenderer.send('win:close')
   }
 }
 
