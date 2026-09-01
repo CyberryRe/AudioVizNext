@@ -124,16 +124,18 @@ export default function App(): React.JSX.Element {
   // 舞台尺寸随序列设置变化
   const stage = useMemo(() => ({ width: stageConfig.width, height: stageConfig.height }), [stageConfig])
 
-  // 时间轴总长（帧）
+  // 时间轴总长（帧）：默认很长（例如 5 小时 @fps），长素材也能从容编辑；
+  // 若某 clip 终点超过默认值则跟随扩展（始终 ≥ 最远 clip 终点）。
   const total = useMemo(
     () => {
       let max = 0
       for (const clips of Object.values(project.clips)) {
         for (const c of clips) max = Math.max(max, c.startFrame + c.durationFrames)
       }
-      return max || 30 * 20
+      const DEFAULT_FRAMES = 5 * 3600 * project.fps // 5 小时
+      return Math.max(max, DEFAULT_FRAMES)
     },
-    [project]
+    [project, project.fps]
   )
 
   // ===== 序列设置：改比例 + 分辨率 =====

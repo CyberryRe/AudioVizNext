@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Project, Clip } from '../model/timeline'
 import { resolveTimeline, parseLrc, lrcLineAt } from '../model/timeline'
 import { formatTimecode } from '../model/demo'
+import { PixiRenderer } from '../pixi/PixiRenderer'
 
 interface MonitorProps {
   project: Project
@@ -33,6 +34,30 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
   const videoRefs = useRef<(HTMLVideoElement | null)[]>([])
   // 收集音频 clip 的 <audio> 元素（「单次播放」等音频轨发声用）
   const audioRefs = useRef<(HTMLAudioElement | null)[]>([])
+
+  // ===== PixiJS 渲染管线（可选开启；开启后用 Pixi canvas 渲染视觉层，DOM 层兜底） =====
+  const [pixiOn, setPixiOn] = useState(false)
+  const [pixiErr, setPixiErr] = useState<string | null>(null)
+  const pixiRef = useRef<PixiRenderer | null>(null)
+  const pixiHostRef = useRef<HTMLDivElement>(null)
+  // 初始化 PixiRenderer（懒加载，切到开启时初始化一次）
+  useEffect(() => {
+    if (!pixiOn) return
+    let cancelled = false
+    const host = pixiHostRef.current
+    if (!host) return
+    const pr = new PixiRenderer(host)
+    pixiRef.current = pr
+    pr.init()
+      .then(() => { if (cancelled) pr.destroy() })
+      .catch((e) => { if (!cancelled) setPixiErr(String(e?.message ?? e)) })
+    return () => { cancelled = true; pixiRef.current = null }
+  }, [pixiOn])
+  // 每帧喂给 PixiRenderer 渲染
+  useEffect(() => {
+    if (!pixiOn) return
+    pixiRef.current?.render(frame, project, fps)
+  }, [pixiOn, frame, project, fps])
 
   // 监听预览区尺寸，自适应缩放画幅(Mask)，改比例/窗口大小都会跟随
   useEffect(() => {
@@ -177,6 +202,13 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div className="tabline">
         <span className="tab active">节目: 序列 01</span>
+        <span
+          onClick={() => { setPixiOn((v) => !v); setPixiErr(null) }}
+          title="切换渲染后端：DOM(CSS) / PixiJS(WebGL)"
+          style={{ marginLeft: 12, cursor: 'pointer', fontSize: 11, padding: '2px 8px', borderRadius: 3, background: pixiOn ? 'var(--accent)' : 'transparent', border: '1px solid var(--border-dark)', color: pixiOn ? '#fff' : '#999' }}
+        >
+          Pixi
+        </span>
         <span style={{ marginLeft: 'auto', color: '#888', cursor: 'pointer' }}>☰</span>
       </div>
 
@@ -192,6 +224,15 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
           overflow: 'hidden'
         }}
       >
+        {/* Pixi 渲染后端宿主（开启时挂 WebGL canvas，遮罩/音频仍在 DOM 叠加） */}
+        <div ref={pixiHostRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
+        {pixiErr && (
+          <div style={{ position: 'absolute', top: 8, left: 8, color: '#ff8080', fontSize: 11, background: 'rgba(0,0,0,.7)', padding: '4px 8px', borderRadius: 3, zIndex: 20 }}>
+            Pixi 初始化失败（已回退 DOM 渲染）：{pixiErr}
+          </div>
+        )}
+
+        {!pixiOn && (<>
         {/* 媒体内容层：完整显示原素材（objectFit:contain，绝不按遮罩比例裁剪），中心对齐画幅；可被变换移动 */}
         {mediaLayers.map((l, i) => {
           const tr = l.transform
@@ -258,36 +299,67 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             const ly = lyricTextFor(l.clip.id, l.clip.sourceFrame)
             const s = clip?.lyrics
             const isLyric = clip?.isLyrics
-            const fontSize = (s?.fontSize ?? 48) * (s?.scale ?? 1)
+            // 歌词字号随预览缩放联动：真实字号按「画幅宽度比例」缩放（48px 在 1920 画幅上 = 预览里 48*(maskW/1920)），
+            // 否则预览缩小后歌词仍按绝对 px 显示，看起来不随预览缩放。非歌词文本 clip 用固定字号。
+            const previewScale = maskW / width
+            const lyricBase = (s?.fontSize ?? 48) * (s?.scale ?? 1)
+            const fontSize = isLyric ? lyricBase * previewScale : (s?.fontSize ?? 48)
             const align = s?.align ?? 'center'
             const color = s?.color ?? '#ffffff'
             const glowOn = s?.glowEnabled ?? true
             const glowColor = s?.glowColor ?? '#00e5ff'
+            // 位置：画幅内偏移（同 transform 语义），中心 0,0；预览态按 maskW/H 换算
+            const lx = (s?.x ?? 0) * maskW
+            const lyy = (s?.y ?? 0) * maskH
+            // 3D 旋转（CSS 3D transform）：perspective 提供纵深视差
+            const rx = s?.rotateX ?? 0
+            const ry = s?.rotateY ?? 0
+            const rz = s?.rotateZ ?? 0
+            const has3D = rx !== 0 || ry !== 0 || rz !== 0
+            // 外框负责透视 + 纵深；内层负责平移（3D 生效时平移放外框 transform，避免与 rotate 冲突）
+            const outerTransform = has3D
+              ? `perspective(900px) translate(calc(-50% + ${lx}px), calc(-50% + ${lyy}px))`
+              : `translate(calc(-50% + ${lx}px), calc(-50% + ${lyy}px))`
+            const innerTransform = has3D
+              ? `rotateX(${rx}deg) rotateY(${ry}deg) rotateZ(${rz}deg)`
+              : undefined
             return (
               <div
                 key={l.clip.id}
                 style={{
                   position: 'absolute',
-                  inset: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center',
-                  padding: '0 40px',
-                  color,
-                  fontFamily: s?.fontFamily ?? 'sans-serif',
-                  fontSize,
-                  fontWeight: 700,
-                  lineHeight: 1.4,
-                  textAlign: align,
-                  opacity: l.clip.opacity,
-                  whiteSpace: 'pre-wrap',
-                  pointerEvents: 'none',
-                  textShadow: glowOn
-                    ? `0 0 ${Math.max(6, fontSize * 0.15)}px ${glowColor}, 0 0 ${Math.max(18, fontSize * 0.4)}px ${glowColor}`
-                    : '0 2px 8px rgba(0,0,0,.6)'
+                  left: '50%',
+                  top: '50%',
+                  width: '100%',
+                  transform: outerTransform,
+                  transformStyle: has3D ? 'preserve-3d' : undefined,
+                  // 旋转应用在歌词文本容器上
                 }}
               >
-                {isLyric ? (ly.text || ' ') : (l.clip.content ?? '')}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center',
+                    padding: '0 40px',
+                    color,
+                    fontFamily: s?.fontFamily ?? 'sans-serif',
+                    fontSize,
+                    fontWeight: 700,
+                    lineHeight: 1.4,
+                    textAlign: align,
+                    opacity: l.clip.opacity,
+                    whiteSpace: 'pre-wrap',
+                    pointerEvents: 'none',
+                    transform: innerTransform,
+                    transformStyle: has3D ? 'preserve-3d' : undefined,
+                    textShadow: glowOn
+                      ? `0 0 ${Math.max(6, fontSize * 0.15)}px ${glowColor}, 0 0 ${Math.max(18, fontSize * 0.4)}px ${glowColor}`
+                      : '0 2px 8px rgba(0,0,0,.6)'
+                  }}
+                >
+                  {isLyric ? (ly.text || ' ') : (l.clip.content ?? '')}
+                </div>
               </div>
             )
           })}
@@ -297,6 +369,7 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             </div>
           )}
         </div>
+        </>)}
 
         {/* 音频 clip（不可见，仅发声） */}
         {audioLayers.map((l, i) => (

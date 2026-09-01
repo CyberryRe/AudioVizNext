@@ -37,6 +37,15 @@
 .right-top { grid-column: 3; grid-row: 1; border-right: 0; }
 .right-bottom { grid-column: 3; grid-row: 2; border-right: 0; }
 
+/* 时间轴横向滚动容器：保留横向平移（Ctrl+滚轮/播放头定位），但隐藏横向滚动条 UI（用户要求删除水平滑块） */
+.avn-hscroll-hidden {
+  scrollbar-width: none;            /* Firefox */
+  -ms-overflow-style: none;         /* IE/Edge 旧 */
+}
+.avn-hscroll-hidden::-webkit-scrollbar {
+  display: none;                    /* Chrome/Safari/Edge 新：隐藏滚动条，但仍可滚 */
+}
+
 .panel-head {
   height: 29px;
   flex: none;

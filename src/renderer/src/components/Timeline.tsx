@@ -106,6 +106,11 @@ export default function Timeline({
 
   const [videoCollapsed, setVideoCollapsed] = useState(false)
   const [audioCollapsed, setAudioCollapsed] = useState(false)
+  // 吸附开关（锚 ⚓ 图标切换）；开启后拖动/缩放 clip 时，附近 2% 视口内有其它 clip 首尾则吸附
+  const [snapEnabled, setSnapEnabled] = useState(true)
+  // 横向滚动量（用于标尺按可视区裁剪，避免超长时间轴渲染上万个刻度）
+  const [scrollLeft, setScrollLeft] = useState(0)
+  const [hViewportW, setHViewportW] = useState(800)
 
   const videoTracks = project.tracks.filter((t) => t.zone === 'video')
   const audioTracks = project.tracks.filter((t) => t.zone === 'audio')
@@ -121,9 +126,13 @@ export default function Timeline({
     return Math.max(0, Math.round(contentX / pxRef.current))
   }
 
-  // 记录滚动量
+  // 记录滚动量 + 可视区宽度（供标尺裁剪）
   const onScroll = (): void => {
-    if (hScrollRef.current) scrollLeftRef.current = hScrollRef.current.scrollLeft
+    if (hScrollRef.current) {
+      scrollLeftRef.current = hScrollRef.current.scrollLeft
+      setScrollLeft(hScrollRef.current.scrollLeft)
+      setHViewportW(hScrollRef.current.clientWidth)
+    }
   }
 
   /** 缩放并让光标下的帧保持在光标位置（锚点缩放） */
@@ -142,6 +151,7 @@ export default function Timeline({
       const target = frameAtCursor * newPx - (rect ? clientX - rect.left : 0)
       el.scrollLeft = Math.max(0, target)
       scrollLeftRef.current = el.scrollLeft
+      setScrollLeft(el.scrollLeft) // 同步状态，让标尺按新滚动量裁剪
     })
   }
 
@@ -201,6 +211,22 @@ export default function Timeline({
   // 内容宽度（至少撑满可视区，避免内容短时右侧空白不可点）
   const contentWidth = Math.max(totalPx, 1)
 
+  // 吸附阈值 = 可视区宽度 2% 对应的帧数（随缩放联动：放大后更精细、更易吸附）
+  const snapThresholdFrames = snapEnabled
+    ? Math.max(1, Math.round((hScrollRef.current?.clientWidth ?? 800) * 0.02 / pxPerFrame))
+    : 0
+  // 所有 clip 的首尾边缘（作为吸附目标，含自身之外的其它 clip）
+  const clipEdges = snapEnabled
+    ? (() => {
+        const edges = new Set<number>()
+        for (const clips of Object.values(project.clips)) {
+          for (const c of clips) { edges.add(c.startFrame); edges.add(c.startFrame + c.durationFrames) }
+        }
+        edges.delete(0) // 0 是绝对边界，始终允许到 0，不参与吸附判定
+        return Array.from(edges).sort((a, b) => a - b)
+      })()
+    : []
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div className="tabline">
@@ -237,7 +263,11 @@ export default function Timeline({
         >
           {/* 顶部固定行：吸附/链接/设置 */}
           <div style={{ height: RULER_HEIGHT, flex: 'none', borderBottom: '1px solid var(--border-dark)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', gap: 8, fontSize: 12, background: 'var(--bg-panel-head)' }}>
-            <span title="吸附" style={{ cursor: 'pointer' }}>⚓</span>
+            <span
+              title={snapEnabled ? '吸附：开（拖动 clip 自动吸附到其它 clip 首尾）' : '吸附：关'}
+              onClick={() => setSnapEnabled((s) => !s)}
+              style={{ cursor: 'pointer', color: snapEnabled ? 'var(--accent-playhead)' : 'inherit', fontWeight: snapEnabled ? 700 : 400 }}
+            >⚓</span>
             <span title="链接" style={{ cursor: 'pointer' }}>🔗</span>
             <span title="轨道设置" style={{ cursor: 'pointer' }}>🔧</span>
           </div>
@@ -251,13 +281,14 @@ export default function Timeline({
           ref={hScrollRef}
           onScroll={onScroll}
           onWheel={handleWheel}
+          className="avn-hscroll-hidden"
           style={{ overflowX: 'auto', overflowY: 'hidden', position: 'relative', background: 'var(--bg-timeline)', cursor: 'crosshair' }}
           onDragOver={handleDragOver}
           onDrop={handleDrop}
         >
           {/* 内容宽度（至少撑满可视区）；高度由自然流内容决定，播放头覆盖全高 */}
           <div style={{ position: 'relative', width: contentWidth, minWidth: '100%', minHeight: '100%' }}>
-            <Ruler total={total} fps={fps} pxPerFrame={pxPerFrame} onSeek={onSeek} frameFromEvent={frameFromEvent} />
+            <Ruler total={total} fps={fps} pxPerFrame={pxPerFrame} onSeek={onSeek} frameFromEvent={frameFromEvent} scrollLeft={scrollLeft} viewportW={hViewportW} />
 
             {/* 视频区轨道行 */}
             <ZoneRows
@@ -274,6 +305,9 @@ export default function Timeline({
               onSeek={onSeek}
               frameFromEvent={frameFromEvent}
               collapsed={videoCollapsed}
+              snapEnabled={snapEnabled}
+              snapThresholdFrames={snapThresholdFrames}
+              clipEdges={clipEdges}
             />
             {/* 音频区轨道行（自然流：紧接视频区下方，绝不重叠） */}
             <ZoneRows
@@ -290,6 +324,9 @@ export default function Timeline({
               onSeek={onSeek}
               frameFromEvent={frameFromEvent}
               collapsed={audioCollapsed}
+              snapEnabled={snapEnabled}
+              snapThresholdFrames={snapThresholdFrames}
+              clipEdges={clipEdges}
             />
 
             {/* 播放头（随内容横向滚动） */}
@@ -329,14 +366,33 @@ export default function Timeline({
   )
 }
 
-/** 标尺 */
-function Ruler({ total, fps, pxPerFrame, onSeek, frameFromEvent }: {
+/** 标尺：按缩放自适应刻度间隔，且仅渲染可视区附近的刻度（长时间轴不渲染上万个节点） */
+function Ruler({ total, fps, pxPerFrame, onSeek, frameFromEvent, scrollLeft = 0, viewportW = 800 }: {
   total: number
   fps: number
   pxPerFrame: number
   onSeek: (f: number) => void
   frameFromEvent: (clientX: number) => number
+  scrollLeft?: number
+  viewportW?: number
 }): React.JSX.Element {
+  // 选定刻度间隔（帧）：使刻度间距 ≥ ~110px，从预设秒数档位里挑
+  const targetFrames = Math.max(fps, Math.ceil((110 / Math.max(pxPerFrame, 0.001)) / fps) * fps)
+  // 秒数档位：1/2/5/10/15/30/60/120/300/600/1800/3600…
+  const secSteps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600]
+  let stepSec = secSteps[0]
+  for (const s of secSteps) {
+    if (s * fps >= targetFrames) { stepSec = s; break }
+    stepSec = s
+  }
+  const stepFrames = stepSec * fps
+
+  // 可视窗口：scrollLeft 附近（含左右 1.5 屏余量）
+  const startFrame = Math.max(0, Math.floor((scrollLeft - viewportW * 1.5) / pxPerFrame / stepFrames) * stepFrames)
+  const endFrame = Math.min(total, Math.ceil((scrollLeft + viewportW * 2.5) / pxPerFrame / stepFrames) * stepFrames)
+  const ticks: number[] = []
+  for (let f = startFrame; f <= endFrame; f += stepFrames) ticks.push(f)
+
   return (
     <div
       style={{
@@ -348,14 +404,11 @@ function Ruler({ total, fps, pxPerFrame, onSeek, frameFromEvent }: {
       }}
       onMouseDown={(e) => onSeek(frameFromEvent(e.clientX))}
     >
-      {Array.from({ length: Math.floor(total / fps) + 1 }).map((_, i) => {
-        const left = i * fps * pxPerFrame
-        return (
-          <span key={i} style={{ position: 'absolute', top: 4, left, color: '#aaa', fontSize: 11, whiteSpace: 'nowrap', cursor: 'crosshair' }}>
-            {formatTimecode(i * fps, fps)}
-          </span>
-        )
-      })}
+      {ticks.map((f) => (
+        <span key={f} style={{ position: 'absolute', top: 4, left: f * pxPerFrame, color: '#aaa', fontSize: 11, whiteSpace: 'nowrap', cursor: 'crosshair' }}>
+          {formatTimecode(f, fps)}
+        </span>
+      ))}
     </div>
   )
 }
@@ -444,7 +497,7 @@ function TrackControlRow({ track, onToggleTrack }: {
 }
 
 /** 右侧某分区轨道行（自然流：紧跟上一个分区之后，高度 = 折叠头 + 各轨行，绝不重叠/侵入其它区）。collapsed 时只显示折叠头。 */
-function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectClip, onMoveClip, onResizeClip, onMoveClipAcrossTracks, getAsset, onSeek, frameFromEvent, collapsed }: {
+function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectClip, onMoveClip, onResizeClip, onMoveClipAcrossTracks, getAsset, onSeek, frameFromEvent, collapsed, snapEnabled, snapThresholdFrames, clipEdges }: {
   zone: TrackZone
   tracks: Track[]
   clips: Record<string, Clip[]>
@@ -458,6 +511,9 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
   onSeek: (f: number) => void
   frameFromEvent: (clientX: number) => number
   collapsed?: boolean
+  snapEnabled?: boolean
+  snapThresholdFrames?: number
+  clipEdges?: number[]
 }): React.JSX.Element {
   // 跨轨拖动的目标解析：由 Y 坐标找所在轨道行（同区）。
   const resolveTargetByY = (clientY: number): { trackId: string | null; isNewTop: boolean } => {
@@ -520,6 +576,9 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
                 }
               }}
               getAsset={getAsset}
+              snapEnabled={snapEnabled}
+              snapThresholdFrames={snapThresholdFrames}
+              clipEdges={clipEdges}
             />
           ))}
         </div>
@@ -528,8 +587,8 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
   )
 }
 
-/** 单个 clip 块 —— 支持水平/跨轨拖动 + 右缘调整时长 */
-function ClipBlock({ clip, track, pxPerFrame, selected, onSelect, onMove, onResize, resolveTargetByY, onCrossMove, getAsset }: {
+/** 单个 clip 块 —— 支持水平/跨轨拖动 + 右缘调整时长；开启吸附时自动对齐附近 clip 首尾 */
+function ClipBlock({ clip, track, pxPerFrame, selected, onSelect, onMove, onResize, resolveTargetByY, onCrossMove, getAsset, snapEnabled, snapThresholdFrames, clipEdges }: {
   clip: Clip
   track: Track
   pxPerFrame: number
@@ -540,9 +599,24 @@ function ClipBlock({ clip, track, pxPerFrame, selected, onSelect, onMove, onResi
   resolveTargetByY: (clientY: number) => { trackId: string | null; isNewTop: boolean }
   onCrossMove: (targetTrackId: string | null, newStart: number, isNewTop: boolean) => void
   getAsset: (id: string) => MediaAsset | undefined
+  snapEnabled?: boolean
+  snapThresholdFrames?: number
+  clipEdges?: number[]
 }): React.JSX.Element {
   const left = clip.startFrame * pxPerFrame
   const width = clip.durationFrames * pxPerFrame
+
+  // 吸附：从候选边缘里找距 target 最近且在阈值内的值；无则返回原值。
+  const snap = (target: number): number => {
+    if (!snapEnabled || !clipEdges || !snapThresholdFrames) return target
+    let best: number | null = null
+    let bestDist = snapThresholdFrames + 1
+    for (const e of clipEdges) {
+      const d = Math.abs(e - target)
+      if (d < bestDist) { bestDist = d; best = e }
+    }
+    return best !== null && bestDist <= snapThresholdFrames ? best : target
+  }
 
   const startMove = (e: React.MouseEvent): void => {
     e.stopPropagation()
@@ -553,7 +627,7 @@ function ClipBlock({ clip, track, pxPerFrame, selected, onSelect, onMove, onResi
 
     const move = (ev: MouseEvent): void => {
       const deltaFrame = Math.round((ev.clientX - startClientX) / pxPerFrame)
-      const newStart = Math.max(0, startFrame + deltaFrame)
+      const newStart = snap(Math.max(0, startFrame + deltaFrame))
       const { trackId, isNewTop } = resolveTargetByY(ev.clientY)
 
       if (isNewTop && lastTarget !== '__new__') {
@@ -583,9 +657,12 @@ function ClipBlock({ clip, track, pxPerFrame, selected, onSelect, onMove, onResi
     if (track.locked) return
     const startClientX = e.clientX
     const startDur = clip.durationFrames
+    const startFrame = clip.startFrame
     const move = (ev: MouseEvent): void => {
       const deltaFrame = Math.round((ev.clientX - startClientX) / pxPerFrame)
-      onResize(startDur + deltaFrame)
+      // 吸附右缘（startFrame + duration）到附近 clip 首尾
+      const rightEdge = snap(startFrame + startDur + deltaFrame)
+      onResize(rightEdge - startFrame)
     }
     const up = (): void => {
       window.removeEventListener('mousemove', move)

@@ -277,6 +277,19 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
             <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>缩放大小</div>
             <NumberSlider label="缩放" value={lyricStyle.scale ?? 1} min={0.2} max={4} step={0.05} onChange={(v) => setLyrics({ scale: v })} />
 
+            {/* 5.5 位置（在画幅内移动歌词） */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>位置</div>
+            <NumberSlider label="X 位置" value={lyricStyle.x ?? 0} min={-0.5} max={0.5} step={0.005} onChange={(v) => setLyrics({ x: v })} />
+            <NumberSlider label="Y 位置" value={lyricStyle.y ?? 0} min={-0.5} max={0.5} step={0.005} onChange={(v) => setLyrics({ y: v })} />
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>歌词在画幅内移动，画幅（遮罩）固定不变。</div>
+
+            {/* 8. 3D 旋转（CSS 3D transform，透视图幅纵深） */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>3D 旋转</div>
+            <NumberSlider label="X 旋转" value={lyricStyle.rotateX ?? 0} min={-180} max={180} step={1} onChange={(v) => setLyrics({ rotateX: v })} />
+            <NumberSlider label="Y 旋转" value={lyricStyle.rotateY ?? 0} min={-180} max={180} step={1} onChange={(v) => setLyrics({ rotateY: v })} />
+            <NumberSlider label="Z 旋转" value={lyricStyle.rotateZ ?? 0} min={-180} max={180} step={1} onChange={(v) => setLyrics({ rotateZ: v })} />
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>X=上下翻、Y=左右翻、Z=平面旋转（透视纵深）。</div>
+
             {/* 6. 字颜色 */}
             <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>字颜色</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>

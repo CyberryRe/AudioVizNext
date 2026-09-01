@@ -114,6 +114,13 @@ export interface LyricStyle {
   glowEnabled?: boolean
   /** 辉光颜色 */
   glowColor?: string
+  /** 位置（画幅内偏移，-0.5..0.5，同 transform.x/y 语义，画幅中心为 0,0） */
+  x?: number
+  y?: number
+  /** 3D 旋转（度）：绕 X/Y/Z 轴，CSS 3D transform（perspective + rotate3d） */
+  rotateX?: number
+  rotateY?: number
+  rotateZ?: number
 }
 
 /** 歌词默认样式 */
@@ -125,7 +132,12 @@ export function defaultLyricStyle(): LyricStyle {
     scale: 1,
     color: '#ffffff',
     glowEnabled: true,
-    glowColor: '#00e5ff'
+    glowColor: '#00e5ff',
+    x: 0,
+    y: 0,
+    rotateX: 0,
+    rotateY: 0,
+    rotateZ: 0
   }
 }
 
