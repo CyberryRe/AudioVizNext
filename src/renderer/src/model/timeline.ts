@@ -368,12 +368,13 @@ export function bindAssetToClip(
   // 未绑定素材的模板位 clip → 时长随素材、并落素材名
   const isTemplate = !clip.assetId
 
-  // 「单次播放」类 clip：时长上限 = 源素材完整时长；绑定后时长被钳制在该上限内
+  // 「单次播放」类 clip：绑定后时长扩展到源素材完整时长（时间轴 Clip 随之变长），
+  // 同时设 maxDurationFrames = 源完整时长，作为拖尾调整的上限（拉满即停）。
   let maxDurationFrames = clip.maxDurationFrames
   let durationFrames = clip.durationFrames
   if (clip.clampToSource && assetFrames) {
     maxDurationFrames = assetFrames
-    durationFrames = Math.min(durationFrames, assetFrames)
+    durationFrames = assetFrames
   } else if (isTemplate && assetFrames) {
     // 普通模板位（如视频循环）→ 时长对齐源素材
     durationFrames = assetFrames

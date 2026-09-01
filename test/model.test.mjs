@@ -149,12 +149,12 @@ t('maxDurationFrames 内可自由调整', () => {
 })
 
 console.log('== bindAssetToClip 单次播放钳制 ==')
-t('clampToSource 绑定后时长钳制到源时长', () => {
+t('clampToSource 绑定后时长扩展到源完整时长', () => {
   const asset = { id: 'a1', kind: 'audio', name: 'song.mp3', src: 'x.mp3', durationSec: 2, byteSize: 1, addedAt: 0 }
   const clip = createClip({ id: 'c1', type: 'audio', clampToSource: true, durationFrames: 30, maxDurationFrames: 30 })
   const next = bindAssetToClip(clip, asset)
-  // 2 秒 × 30fps = 60 帧；模板位 30 帧 → 被钳制为 min(30,60)=30
-  eq(next.durationFrames, 30, '默认时长 30 < 源 60，保持 30')
+  // 2 秒 × 30fps = 60 帧；绑定后 Clip 时长扩展到源完整时长 60（时间轴变长）
+  eq(next.durationFrames, 60, '时长扩展到源 60')
   eq(next.maxDurationFrames, 60, 'maxDurationFrames = 源 60')
   // 再 resize 到 100 → 被钳制到 60
   const resized = resizeClip([next], 'c1', 100)

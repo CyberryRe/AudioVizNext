@@ -28,6 +28,8 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
 
   // 收集预览视频元素，随播放状态播放/暂停
   const videoRefs = useRef<(HTMLVideoElement | null)[]>([])
+  // 收集音频 clip 的 <audio> 元素（「单次播放」等音频轨发声用）
+  const audioRefs = useRef<(HTMLAudioElement | null)[]>([])
 
   // 估算工程总帧（预览进度条用）
   useEffect(() => {
@@ -54,6 +56,8 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
     ...scene.images.map((i) => ({ z: i.zIndex, src: i.src, opacity: i.opacity, transform: i.transform }))
   ].sort((a, b) => a.z - b.z)
   textLayers.sort((a, b) => a.z - b.z)
+  // 音频 clip（不可见，仅用于发声）
+  const audioLayers = scene.audios.map((a) => ({ src: a.src, volume: a.volume, sourceFrame: a.sourceFrame }))
 
   // 播放状态 → 控制预览视频播放/暂停（未点播放时不自动播放）
   useEffect(() => {
@@ -63,6 +67,25 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
       else v.pause()
     }
   }, [isPlaying, mediaLayers.length])
+
+  // 播放状态 → 控制音频 clip 播放/暂停（「单次播放」等音频轨发声）
+  useEffect(() => {
+    const audios = audioRefs.current.filter((a): a is HTMLAudioElement => !!a)
+    for (const a of audios) {
+      if (isPlaying) a.play().catch(() => {})
+      else a.pause()
+    }
+  }, [isPlaying, audioLayers.length])
+
+  // 非播放时，把每个音频元素定位到当前帧对应的源位置（seek 用）
+  useEffect(() => {
+    if (isPlaying) return
+    const audios = audioRefs.current.filter((a): a is HTMLAudioElement => !!a)
+    for (const a of audios) {
+      const f = Number(a.dataset.sourceFrame || '0')
+      a.currentTime = f / fps
+    }
+  }, [frame, isPlaying, audioLayers.length, fps])
 
   // 进度条拖动 seek
   const progressRef = useRef<HTMLDivElement>(null)
@@ -103,7 +126,8 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
           alignItems: 'center',
           justifyContent: 'center',
           padding: '0 20px 10px',
-          background: '#202020',
+          // 画幅外深色底纹，衬托中间遮罩(Mask)亮边框
+          background: 'radial-gradient(circle at 50% 45%, #262626 0%, #161616 70%)',
           overflow: 'hidden'
         }}
       >
@@ -113,9 +137,12 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             width: 'min(88%, 900px)',
             aspectRatio: `${width}/${height}`,
             background: '#000',
-            boxShadow: '0 0 0 1px #111',
+            // 遮罩(Mask)边界指示：亮边框 + 外侧一圈暗角，让用户看清"渲染会取哪部分"
+            boxShadow: '0 0 0 1px rgba(255,255,255,.28), 0 0 24px rgba(0,0,0,.9)',
+            outline: '1px solid rgba(255,255,255,.08)',
             position: 'relative',
-            overflow: 'hidden'
+            overflow: 'hidden',
+            borderRadius: 2
           }}
         >
           {mediaLayers.length === 0 && textLayers.length === 0 && (
@@ -174,6 +201,17 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
               </div>
             )
           })}
+          {/* 音频 clip（不可见，仅发声） */}
+          {audioLayers.map((l, i) => (
+            <audio
+              key={i}
+              ref={(el) => { audioRefs.current[i] = el }}
+              src={l.src}
+              preload="metadata"
+              data-source-frame={l.sourceFrame}
+              style={{ display: 'none' }}
+            />
+          ))}
         </div>
       </div>
 
