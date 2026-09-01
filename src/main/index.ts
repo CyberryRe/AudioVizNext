@@ -1,5 +1,24 @@
-import { app, shell, BrowserWindow } from 'electron'
+import { app, shell, BrowserWindow, protocol, net } from 'electron'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
+
+// 注册自定义协议 avn-file://：渲染层素材用真实文件路径（持久化），
+// 避免 blob:/data: URL 在工程保存后失效及 WebGL 纹理问题。
+// 必须在 app ready 前注册 scheme 特权（支持媒体流式响应 + 绕过 CSP 自身限制）。
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'avn-file',
+    privileges: {
+      standard: false,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,        // 允许流式传输大媒体文件
+      bypassCSP: false,    // 仍受渲染层 CSP 约束（我们在 CSP 里放行 avn-file:）
+      corsEnabled: true,
+      codeCache: false
+    }
+  }
+])
 
 /** 创建主窗口 */
 function createWindow(): void {
@@ -51,6 +70,23 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // 注册 avn-file:// 处理器：avn-file://<encodeURIComponent(绝对路径)> → 流式返回本地文件
+  // 约定：绝对路径整体做 URI 编码放在 host 位，跨平台（Windows C:\ 与 Unix / 均无歧义）。
+  protocol.handle('avn-file', (request) => {
+    try {
+      const u = new URL(request.url)
+      const absPath = decodeURIComponent(u.hostname)
+      // 校验：只允许绝对路径，防路径穿越（拒绝相对路径）
+      if (!absPath.startsWith('/') && !/^[a-zA-Z]:[\\/]/.test(absPath)) {
+        return new Response('Forbidden: not an absolute path', { status: 403 })
+      }
+      const fileURL = pathToFileURL(absPath).toString()
+      return net.fetch(fileURL)
+    } catch {
+      return new Response('Bad request', { status: 400 })
+    }
+  })
+
   createWindow()
 
   // macOS：点击 Dock 图标且无窗口时重新创建

@@ -156,6 +156,8 @@ export interface MediaAsset {
   addedAt: number
   /** 歌词类素材：LRC 文本内容 */
   textContent?: string
+  /** 素材源文件绝对路径（Electron File.path；用于持久化/导出引用） */
+  sourcePath?: string
 }
 
 // ===== Scene（resolveTimeline 输出） =====
@@ -562,16 +564,29 @@ export function addVideoTrack(tracks: Track[], overrides?: Partial<Track>): { tr
 export function assetFromFile(file: File, index = 0): MediaAsset {
   const kind = kindFromFileName(file.name)
   const now = Date.now()
+  // 优先用真实文件路径（Electron 的 File.path 提供绝对路径），经 avn-file:// 协议加载：
+  //   - 持久化：工程保存/重开后 blob 会失效，路径仍有效
+  //   - 避免 data:/blob: 视频在 WebGL 下的纹理问题
+  // 拿不到 path（纯浏览器环境）时回退 blob URL。
+  let src: string
+  const filePath = (file as unknown as { path?: string }).path
+  if (filePath) {
+    src = `avn-file://${encodeURIComponent(filePath)}`
+  } else {
+    src = URL.createObjectURL(file)
+  }
   return {
     id: `asset-${now.toString(36)}-${index}-${Math.random().toString(36).slice(2, 6)}`,
     kind,
     name: file.name,
-    src: URL.createObjectURL(file), // 本地 blob 预览（图片缩略图可用）
+    src,
     durationSec: 0,
     width: kind === 'image' ? 320 : undefined,
     height: kind === 'image' ? 180 : undefined,
     byteSize: file.size,
-    addedAt: now
+    addedAt: now,
+    // 记录源路径，便于工程保存/导出引用
+    sourcePath: filePath
   }
 }
 

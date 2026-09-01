@@ -11,7 +11,7 @@
  * 说明：Mask（输出画幅）与音频发声不属于 Pixi 视觉层，
  *  Mask 由外层 DOM 叠线框/暗角，音频由 <audio> 元素发声。
  */
-import { Application, Container, Sprite, Text, Assets, Texture } from 'pixi.js'
+import { Application, Container, Sprite, Text, Assets, Texture, BlurFilter } from 'pixi.js'
 // CSP 不允许 unsafe-eval 时，需引入 unsafe-eval 模块做 side-effect：
 // 它覆盖渲染器的 _unsafeEvalCheck 并用避免 eval 的 polyfill 替代（Electron/Chrome 扩展等严格 CSP 环境）
 import 'pixi.js/unsafe-eval'
@@ -41,7 +41,8 @@ export class PixiRenderer {
 
   // 精灵池：key = clip id，避免频繁创建/销毁
   private sprites = new Map<string, Sprite>()
-  private texts = new Map<string, Text>()
+  // 文本层：key = clip id → Container（含主文本 + 可选辉光副本）。Container 负责位置/Z旋转/透明度，子 Text 负责样式与内容
+  private textLayers = new Map<string, { root: Container; main: Text; glow: Text | null; blur: BlurFilter | null; glowStrength: number }>()
   // 视频元素缓存：key = src → 复用同一 <video> 做纹理源
   private videoEls = new Map<string, HTMLVideoElement>()
   // 图片异步加载去重：key = img:src → Promise
@@ -138,14 +139,19 @@ export class PixiRenderer {
         // 移除残留文本（若曾是该 id 的文本层）
         this.releaseText(l.id, liveIds)
       } else {
-        // 文本层（歌词/文字）
-        let tx = this.texts.get(l.id)
-        if (!tx) {
-          tx = new Text({ text: '' })
-          this.texts.set(l.id, tx)
-          this.root.addChild(tx)
+        // 文本层（歌词/文字）：Container(位置/旋转/透明) + 主 Text + 可选辉光 Text
+        let tl = this.textLayers.get(l.id)
+        if (!tl) {
+          const root = new Container()
+          const main = new Text({ text: '' })
+          const glow = new Text({ text: '' })
+          root.addChild(glow)
+          root.addChild(main)
+          tl = { root, main, glow, blur: null, glowStrength: -1 }
+          this.textLayers.set(l.id, tl)
+          this.root.addChild(root)
         }
-        this.applyText(tx, l, project, fps)
+        this.applyText(tl, l, project, fps)
         // 移除残留精灵
         this.releaseSprite(l.id, liveIds)
       }
@@ -199,8 +205,10 @@ export class PixiRenderer {
       this.videoEls.set(src, el)
     }
     if (el.readyState === 0) el.load()
-    // 必须等元数据就绪（有真实尺寸）才返回纹理，否则无效/空纹理在 WebGL 拷贝时会 GL_INVALID_VALUE 越界
-    if (el.readyState < 1 || !el.videoWidth || !el.videoHeight) return null
+    // 必须等有实际帧数据（HAVE_CURRENT_DATA, readyState>=2）才返回纹理；
+    // 仅元数据(readyState=1)时视频尺寸已可读，但像素数据未就绪，WebGL 拷贝会
+    // GL_INVALID_OPERATION: destination level must be defined。
+    if (el.readyState < 2 || !el.videoWidth || !el.videoHeight) return null
     const tex = Texture.from(el)
     return tex
   }
@@ -222,8 +230,13 @@ export class PixiRenderer {
     if (Math.abs(el.currentTime - target) > 0.06) el.currentTime = target
   }
 
-  /** 应用文本样式与内容（歌词解析当前句 + 3D 旋转用 CSS 层代为表达；Pixi 文本先用基础样式） */
-  private applyText(tx: Text, l: Layer, project: Project, fps: number): void {
+  /** 应用文本样式与内容（歌词解析当前句）。辉光用模糊副本实现（近似 CSS text-shadow glow）。 */
+  private applyText(
+    tl: { root: Container; main: Text; glow: Text | null; blur: BlurFilter | null; glowStrength: number },
+    l: Layer,
+    project: Project,
+    fps: number
+  ): void {
     const s = l.lyrics
     const fontSize = (s?.fontSize ?? 48) * (s?.scale ?? 1)
     // 歌词：取当前句；普通文本：取 content
@@ -233,33 +246,53 @@ export class PixiRenderer {
       const sec = l.sourceFrame / fps
       text = lrcLineAt(lines, sec)
     }
-    tx.text = text || ' '
-    tx.style.fill = s?.color ?? '#ffffff'
-    tx.style.fontFamily = s?.fontFamily ?? 'sans-serif'
-    tx.style.fontSize = fontSize
-    tx.style.fontWeight = 700
-    // 对齐
-    const align = s?.align ?? 'center'
-    tx.anchor.set(align === 'left' ? 0 : align === 'right' ? 1 : 0.5, 0.5)
+    const display = text || ' '
+
+    const applyStyle = (t: Text): void => {
+      t.text = display
+      t.style.fill = s?.color ?? '#ffffff'
+      t.style.fontFamily = s?.fontFamily ?? 'sans-serif'
+      t.style.fontSize = fontSize
+      t.style.fontWeight = 700
+      t.style.lineHeight = fontSize * 1.4
+      t.style.wordWrap = true
+      t.style.wordWrapWidth = project.stage.width * 0.9
+      t.style.align = s?.align ?? 'center'
+      // 对齐锚点：左=左缘，右=右缘，中=中心
+      const align = s?.align ?? 'center'
+      t.anchor.set(align === 'left' ? 0 : align === 'right' ? 1 : 0.5, 0.5)
+    }
+    applyStyle(tl.main)
+
+    // 辉光：模糊 + 辉光色的副本叠在底层（复用 blur 过滤器，避免每帧重建）
+    const glowOn = s?.glowEnabled ?? true
+    if (glowOn) {
+      if (!tl.glow) { tl.glow = new Text({ text: '' }); tl.root.addChildAt(tl.glow, 0) }
+      const g = tl.glow
+      applyStyle(g)
+      g.style.fill = s?.glowColor ?? '#00e5ff'
+      const strength = Math.max(6, fontSize * 0.12)
+      if (!tl.blur) { tl.blur = new BlurFilter({ strength }); g.filters = [tl.blur] }
+      else if (Math.abs(tl.glowStrength - strength) > 0.5) { tl.blur.strength = strength }
+      tl.glowStrength = strength
+      g.visible = true
+    } else if (tl.glow) {
+      tl.glow.visible = false
+    }
+
+    // 位置：画幅中心 + 偏移
     const lx = (s?.x ?? 0) * project.stage.width
     const ly = (s?.y ?? 0) * project.stage.height
-    tx.position.set(project.stage.width / 2 + lx, project.stage.height / 2 + ly)
-    tx.alpha = l.opacity
-    // 辉光：用基础阴影近似（后续可换 BlurFilter 精确辉光）
-    if (s?.glowEnabled) {
-      tx.style.dropShadow = true
-      tx.style.dropShadowColor = s?.glowColor ?? '#00e5ff'
-      tx.style.dropShadowBlur = 12
-      tx.style.dropShadowDistance = 0
-    } else {
-      tx.style.dropShadow = false
-    }
+    tl.root.position.set(project.stage.width / 2 + lx, project.stage.height / 2 + ly)
+    tl.root.alpha = l.opacity
+    // Z 轴旋转（Pixi 原生 rotation = 平面旋转）；X/Y 轴 3D 旋转暂不支持（需自研透视投影，Phase B）
+    tl.root.rotation = ((s?.rotateZ ?? 0) * Math.PI) / 180
   }
 
   private releaseText(id: string, live: Set<string>): void {
-    if (this.texts.has(id) && !live.has(id)) {
-      this.texts.get(id)?.destroy()
-      this.texts.delete(id)
+    if (this.textLayers.has(id) && !live.has(id)) {
+      this.textLayers.get(id)?.root.destroy()
+      this.textLayers.delete(id)
     }
   }
   private releaseSprite(id: string, live: Set<string>): void {
@@ -273,8 +306,8 @@ export class PixiRenderer {
     for (const [id, sp] of this.sprites) {
       if (!live.has(id)) { sp.destroy(); this.sprites.delete(id) }
     }
-    for (const [id, tx] of this.texts) {
-      if (!live.has(id)) { tx.destroy(); this.texts.delete(id) }
+    for (const [id, tl] of this.textLayers) {
+      if (!live.has(id)) { tl.root.destroy(); this.textLayers.delete(id) }
     }
   }
 
@@ -284,8 +317,8 @@ export class PixiRenderer {
     this.videoEls.clear()
     this.sprites.forEach((s) => s.destroy())
     this.sprites.clear()
-    this.texts.forEach((t) => t.destroy())
-    this.texts.clear()
+    this.textLayers.forEach((tl) => tl.root.destroy())
+    this.textLayers.clear()
     if (this.app) {
       this.app.destroy(true)
       this.app = null
