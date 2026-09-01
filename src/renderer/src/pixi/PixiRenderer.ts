@@ -41,6 +41,8 @@ export class PixiRenderer {
   private texts = new Map<string, Text>()
   // 视频元素缓存：key = src → 复用同一 <video> 做纹理源
   private videoEls = new Map<string, HTMLVideoElement>()
+  // 图片异步加载去重：key = img:src → Promise
+  private imageLoading = new Map<string, Promise<unknown>>()
   // 当前是否已挂载 canvas
   private mounted = false
 
@@ -171,9 +173,13 @@ export class PixiRenderer {
     if (!src) return null
     const low = src.toLowerCase()
     if (/\.(png|jpe?g|gif|webp|bmp)(\?|#|$)/.test(low) || src.startsWith('data:image')) {
-      // 图片：用 Assets 加载
+      // 图片：懒加载到 Assets 缓存（blob:/本地路径首次 load，之后复用）
       try {
-        return Assets.get(src) ?? null
+        const existing = Assets.get(src)
+        if (existing) return existing
+        // 异步加载，加载完成前返回 null（下一帧自动出现）
+        this.loadImage(src).catch(() => {})
+        return null
       } catch {
         return null
       }
@@ -192,6 +198,15 @@ export class PixiRenderer {
     if (el.readyState === 0) el.load()
     const tex = Texture.from(el)
     return tex
+  }
+
+  /** 异步加载图片纹理到 Assets 缓存（带去重） */
+  private async loadImage(src: string): Promise<void> {
+    const key = `img:${src}`
+    if (this.imageLoading.has(key)) return this.imageLoading.get(key)!
+    const p = Assets.load(src).then((t) => { this.imageLoading.delete(key); return t })
+    this.imageLoading.set(key, p)
+    await p
   }
 
   /** 定位视频源帧（非播放时用于精确 seek） */
