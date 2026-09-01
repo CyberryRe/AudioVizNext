@@ -12,6 +12,9 @@
  *  Mask 由外层 DOM 叠线框/暗角，音频由 <audio> 元素发声。
  */
 import { Application, Container, Sprite, Text, Assets, Texture } from 'pixi.js'
+// CSP 不允许 unsafe-eval 时，需引入 unsafe-eval 模块做 side-effect：
+// 它覆盖渲染器的 _unsafeEvalCheck 并用避免 eval 的 polyfill 替代（Electron/Chrome 扩展等严格 CSP 环境）
+import 'pixi.js/unsafe-eval'
 import type { Project } from '../model/timeline'
 import { resolveTimeline, parseLrc, lrcLineAt } from '../model/timeline'
 import type { ActiveVideoClip, ActiveImageClip, ActiveTextClip, LyricStyle } from '../model/timeline'
