@@ -37,3 +37,10 @@ reference/
 
 # ===== TypeScript 增量编译缓存 =====
 *.tsbuildinfo
+
+# ===== electron-vite 配置转译临时产物 =====
+electron.vite.config.*.mjs
+
+# ===== 本地开发文档与记忆（不上传公开仓库）=====
+.workbuddy/
+docs/
