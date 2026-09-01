@@ -205,9 +205,9 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
         <span
           onClick={() => { setPixiOn((v) => !v); setPixiErr(null) }}
           title="切换渲染后端：DOM(CSS) / PixiJS(WebGL)"
-          style={{ marginLeft: 12, cursor: 'pointer', fontSize: 11, padding: '2px 8px', borderRadius: 3, background: pixiOn ? 'var(--accent)' : 'transparent', border: '1px solid var(--border-dark)', color: pixiOn ? '#fff' : '#999' }}
+          style={{ marginLeft: 14, cursor: 'pointer', fontSize: 11, padding: '3px 10px', borderRadius: 3, background: pixiOn ? '#2a7de1' : '#1d1d1d', border: '1px solid ' + (pixiOn ? '#5aa7ff' : '#555'), color: pixiOn ? '#fff' : '#e0e0e0', fontWeight: 600, userSelect: 'none' }}
         >
-          Pixi
+          {pixiOn ? '渲染: Pixi' : '渲染: DOM'}
         </span>
         <span style={{ marginLeft: 'auto', color: '#888', cursor: 'pointer' }}>☰</span>
       </div>
