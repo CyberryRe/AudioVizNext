@@ -31,3 +31,9 @@ coverage/
 
 # ===== 二进制工具（可重新下载）=====
 ffmpeg/
+
+# ===== 参考项目（用户外部导入，不入库）=====
+reference/
+
+# ===== TypeScript 增量编译缓存 =====
+*.tsbuildinfo
