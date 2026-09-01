@@ -12,6 +12,9 @@
 /** 轨道类型 */
 export type TrackKind = 'video' | 'audio' | 'text'
 
+/** 时间轴分区：视频区（上） / 音频区（下），两区独立折叠滚动 */
+export type TrackZone = 'video' | 'audio'
+
 /** Clip 类型 */
 export type ClipType = 'video' | 'audio' | 'text' | 'image'
 
@@ -43,6 +46,8 @@ export interface Track {
   id: string
   name: string
   kind: TrackKind
+  /** 时间轴分区：video（上）/ audio（下），决定 UI 归属区 */
+  zone: TrackZone
   /** 0 = UI 最顶 = 渲染最前 */
   order: number
   /** UI 高度提示（px） */
@@ -162,6 +167,7 @@ export function createTrack(overrides?: Partial<Track>): Track {
     id: `tr-${Math.random().toString(36).slice(2, 8)}`,
     name: '轨道',
     kind: 'video',
+    zone: 'video',
     order: 0,
     height: 47,
     locked: false,
@@ -170,6 +176,42 @@ export function createTrack(overrides?: Partial<Track>): Track {
     solo: false,
     ...overrides
   }
+}
+
+/** 由轨道类型推断其所属分区 */
+export function zoneForKind(kind: TrackKind): TrackZone {
+  return kind === 'audio' ? 'audio' : 'video'
+}
+
+/** 标准序列比例（宽/高）。随分辨率联动，决定预览与导出比例。 */
+export interface StageRatio {
+  id: string
+  name: string
+  /** 宽高比（宽/高），如 16/9 */
+  ratio: number
+}
+
+/** 内置序列比例预设 */
+export const STAGE_RATIOS: StageRatio[] = [
+  { id: '16:9', name: '16:9', ratio: 16 / 9 },
+  { id: '9:16', name: '9:16', ratio: 9 / 16 },
+  { id: '1:1', name: '1:1', ratio: 1 },
+  { id: '4:3', name: '4:3', ratio: 4 / 3 },
+  { id: '21:9', name: '21:9', ratio: 21 / 9 },
+  { id: '3:2', name: '3:2', ratio: 3 / 2 }
+]
+
+/**
+ * 依据比例 + 分辨率主边，计算舞台尺寸。
+ * @param ratio 宽高比（宽/高）
+ * @param mainLength 主边像素（宽或高，取决于 orientation）
+ */
+export function stageSizeFor(ratio: number, mainLength: number, orientation: 'landscape' | 'portrait' = 'landscape'): { width: number; height: number } {
+  if (orientation === 'portrait') {
+    // 高 > 宽：ratio = 宽/高 < 1
+    return { width: Math.round(mainLength * ratio), height: mainLength }
+  }
+  return { width: mainLength, height: Math.round(mainLength / ratio) }
 }
 
 export function createClip(overrides?: Partial<Clip>): Clip {
@@ -270,6 +312,100 @@ export function kindFromFileName(name: string): MediaAsset['kind'] {
   if (['mp3', 'wav', 'flac', 'm4a', 'ogg', 'aac'].includes(ext)) return 'audio'
   if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) return 'image'
   return 'image'
+}
+
+/** 默认 clip 变换（归一化：x/y 为相对画布中心的偏移比例，scaleX/Y 为缩放） */
+export function defaultTransform(): Transform {
+  return { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }
+}
+
+/**
+ * 给 clip 绑定素材：更新 src/assetId/name。
+ * 若 asset.kind 与 clip.type 兼容（video→video/image，image→image，audio→audio），
+ * 并对「空模板位」clip（src 以 avn://template/ 开头）同步时长到素材时长。
+ * 返回新 clip（或 null 表示不兼容 / clip 不存在）。
+ */
+export function bindAssetToClip(
+  clip: Clip | undefined,
+  asset: MediaAsset | undefined
+): Clip | null {
+  if (!clip || !asset) return null
+  // 类型兼容校验
+  const compatible =
+    (clip.type === 'video' && asset.kind === 'video') ||
+    (clip.type === 'video' && asset.kind === 'image') ||
+    (clip.type === 'image' && asset.kind === 'image') ||
+    (clip.type === 'audio' && asset.kind === 'audio')
+  if (!compatible) return null
+
+  const src = asset.src
+  const assetFrames = asset.durationSec ? Math.max(1, Math.round(asset.durationSec * 30)) : undefined
+
+  // 模板位 clip（尚未绑定真实素材）→ 时长随素材、并落素材名
+  const isTemplate = clip.src?.startsWith('avn://template/')
+  const next: Clip = {
+    ...clip,
+    src,
+    assetId: asset.id,
+    name: isTemplate ? asset.name : clip.name,
+    // 模板位 → 时长对齐素材；已绑定过的则保留用户调整过的时长
+    durationFrames: isTemplate && assetFrames ? assetFrames : clip.durationFrames,
+    sourceDurationFrames: isTemplate && assetFrames ? assetFrames : clip.sourceDurationFrames,
+    sourceStartFrame: clip.sourceStartFrame ?? 0
+  }
+  return next
+}
+
+/**
+ * 跨轨移动 clip：把 clip 从原轨移到目标轨，startFrame 改为 newStart。
+ * - 源轨移除该 clip；目标轨 addClipToTrack（自动避免重叠）
+ * - 若目标轨不存在，返回 null（由调用方决定是否自动建轨）
+ * 返回 { clips, moved } 或 null。
+ */
+export function moveClipAcrossTracks(
+  clipsMap: Record<string, Clip[]>,
+  clipId: string,
+  targetTrackId: string,
+  newStart: number
+): { clips: Record<string, Clip[]>; moved: boolean } | null {
+  // 找到 clip 所在源轨
+  let sourceTrackId: string | null = null
+  let clip: Clip | null = null
+  for (const [tid, clips] of Object.entries(clipsMap)) {
+    const c = clips.find((x) => x.id === clipId)
+    if (c) { sourceTrackId = tid; clip = c; break }
+  }
+  if (!sourceTrackId || !clip) return null
+  if (sourceTrackId === targetTrackId) return null
+
+  const targetClips = clipsMap[targetTrackId]
+  if (!targetClips) return null
+
+  const sourceRemoved = (clipsMap[sourceTrackId] ?? []).filter((c) => c.id !== clipId)
+  const relocated: Clip = {
+    ...clip,
+    trackId: targetTrackId,
+    startFrame: Math.max(0, newStart)
+  }
+  const targetNext = addClipToTrack(targetClips, relocated, true)
+  return {
+    clips: { ...clipsMap, [sourceTrackId]: sourceRemoved, [targetTrackId]: targetNext },
+    moved: true
+  }
+}
+
+/**
+ * 新增一个视频轨（自动建轨用）：插入到现有视频轨之上（order 整体 +1，新区块 order=minV）。
+ * 返回新的 tracks 数组与新建轨道。
+ */
+export function addVideoTrack(tracks: Track[], overrides?: Partial<Track>): { tracks: Track[]; track: Track } {
+  const videoTracks = tracks.filter((t) => t.zone === 'video')
+  const minOrder = videoTracks.reduce((m, t) => Math.min(m, t.order), Infinity)
+  const order = Number.isFinite(minOrder) ? minOrder : 0
+  // 把现有 video 轨的 order 整体下移（+1），让新轨在最顶
+  const shifted = tracks.map((t) => (t.zone === 'video' ? { ...t, order: t.order + 1 } : t))
+  const track = createTrack({ kind: 'video', zone: 'video', order, name: `V${videoTracks.length + 1}`, ...overrides })
+  return { tracks: [...shifted, track], track }
 }
 
 /** 从 File 对象构造 MediaAsset（本地拖入素材库）。 */

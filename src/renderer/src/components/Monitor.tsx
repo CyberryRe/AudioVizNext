@@ -47,11 +47,11 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
     return () => clearInterval(id)
   }, [isPlaying, frame, fps, onSeek])
 
-  // 按 zIndex 升序排序，最后渲染的在上层
+  // 按 zIndex 升序排序，最后渲染的在上层。收集 transform 以应用缩放/位置。
   const textLayers = scene.texts.map((t) => ({ z: t.zIndex, clip: t }))
   const mediaLayers = [
-    ...scene.videos.map((v) => ({ z: v.zIndex, src: v.src, opacity: v.opacity })),
-    ...scene.images.map((i) => ({ z: i.zIndex, src: i.src, opacity: i.opacity }))
+    ...scene.videos.map((v) => ({ z: v.zIndex, src: v.src, opacity: v.opacity, transform: v.transform })),
+    ...scene.images.map((i) => ({ z: i.zIndex, src: i.src, opacity: i.opacity, transform: i.transform }))
   ].sort((a, b) => a.z - b.z)
   textLayers.sort((a, b) => a.z - b.z)
 
@@ -143,25 +143,35 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
               {l.clip.content}
             </div>
           ))}
-          {mediaLayers.map((l, i) => (
-            <video
-              key={i}
-              ref={(el) => { videoRefs.current[i] = el }}
-              src={l.src}
-              muted
-              loop
-              playsInline
-              preload="metadata"
-              style={{
-                position: 'absolute',
-                inset: 0,
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                opacity: l.opacity
-              }}
-            />
-          ))}
+          {mediaLayers.map((l, i) => {
+            const tr = l.transform
+            const scaleX = tr?.scaleX ?? 1
+            const scaleY = tr?.scaleY ?? 1
+            const tx = tr?.x ?? 0
+            const ty = tr?.y ?? 0
+            return (
+              <video
+                key={i}
+                ref={(el) => { videoRefs.current[i] = el }}
+                src={l.src}
+                muted
+                loop
+                playsInline
+                preload="metadata"
+                style={{
+                  position: 'absolute',
+                  left: '50%',
+                  top: '50%',
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                  opacity: l.opacity,
+                  transform: `translate(-50%, -50%) translate(${tx * 50}%, ${ty * 50}%) scale(${scaleX}, ${scaleY})`,
+                  transformOrigin: 'center'
+                }}
+              />
+            )
+          })}
         </div>
       </div>
 

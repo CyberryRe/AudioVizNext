@@ -1,19 +1,155 @@
-import type { Project } from '../model/timeline'
+import { useRef, useState } from 'react'
+import type { Project, Clip, MediaAsset } from '../model/timeline'
 
 interface EffectControlsProps {
   selectedClipId: string | null
   project: Project
+  getAsset: (id: string) => MediaAsset | undefined
+  onUpdateClipParams: (clipId: string, patch: Partial<Clip>) => void
+  onBindAssetToClip: (clipId: string, assetId: string) => void
 }
 
-/** 左上：效果控件 —— 显示选中 clip 的属性；未选中则提示 */
-export default function EffectControls({ selectedClipId, project }: EffectControlsProps): React.JSX.Element {
+/** 滑块控件：label + 数值输入 + 拖动改值 */
+function NumberSlider({ label, value, min, max, step, onChange }: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  onChange: (v: number) => void
+}): React.JSX.Element {
+  const ref = useRef<HTMLDivElement>(null)
+
+  const startDrag = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    const el = ref.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const update = (clientX: number): void => {
+      const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
+      const raw = min + ratio * (max - min)
+      onChange(Math.round(raw / step) * step)
+    }
+    update(e.clientX)
+    const move = (ev: MouseEvent): void => update(ev.clientX)
+    const up = (): void => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
+  const pct = ((value - min) / (max - min)) * 100
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '52px 1fr 52px', alignItems: 'center', gap: 8, marginBottom: 9 }}>
+      <span style={{ fontSize: 12, color: '#bbb' }}>{label}</span>
+      <div
+        ref={ref}
+        onMouseDown={startDrag}
+        style={{ height: 12, background: '#111', border: '1px solid #333', borderRadius: 3, position: 'relative', cursor: 'ew-resize' }}
+      >
+        <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: '#2a6fa8', borderRadius: 3 }} />
+        <div style={{ position: 'absolute', left: `calc(${pct}% - 4px)`, top: -3, width: 8, height: 18, background: '#ccc', borderRadius: 2 }} />
+      </div>
+      <input
+        type="number"
+        value={Math.round(value * 100) / 100}
+        step={step}
+        min={min}
+        max={max}
+        onChange={(e) => {
+          const v = Number(e.target.value)
+          if (!Number.isNaN(v)) onChange(Math.max(min, Math.min(max, v)))
+        }}
+        style={{ width: 52, background: '#1d1d1d', border: '1px solid #333', color: '#eee', padding: '3px 5px', fontSize: 11, borderRadius: 3, textAlign: 'right' }}
+      />
+    </div>
+  )
+}
+
+/** 素材拖入槽（关联素材） */
+function MediaSlot({ clip, getAsset, onBind }: {
+  clip: Clip
+  getAsset: (id: string) => MediaAsset | undefined
+  onBind: (assetId: string) => void
+}): React.JSX.Element {
+  const [over, setOver] = useState(false)
+  const bound = clip.assetId ? getAsset(clip.assetId) : undefined
+  const boundName = bound?.name ?? clip.name
+
+  const handleDrop = (e: React.DragEvent): void => {
+    e.preventDefault()
+    e.stopPropagation()
+    setOver(false)
+    // 读取素材 id
+    try {
+      const raw = e.dataTransfer.getData('application/x-avn-asset')
+      if (raw) {
+        const p = JSON.parse(raw)
+        if (p.assetId) { onBind(p.assetId); return }
+      }
+    } catch { /* ignore */ }
+    const stash = (window as unknown as Record<string, unknown>)._avsPendingDrag as { type: 'asset'; assetId: string } | undefined
+    if (stash?.type === 'asset') { onBind(stash.assetId) }
+  }
+
+  return (
+    <div
+      onDragOver={(e) => { e.preventDefault(); setOver(true) }}
+      onDragLeave={() => setOver(false)}
+      onDrop={handleDrop}
+      style={{
+        border: `1px dashed ${over ? '#19a8ff' : '#555'}`,
+        borderRadius: 4,
+        padding: '12px 10px',
+        textAlign: 'center',
+        color: over ? '#19a8ff' : '#aaa',
+        fontSize: 12,
+        background: over ? 'rgba(25,168,255,.08)' : 'transparent',
+        cursor: 'pointer',
+        transition: 'border-color .15s, color .15s'
+      }}
+      title="从素材库拖入媒体素材以快速填充"
+    >
+      {bound ? (
+        <>
+          <div style={{ color: '#eee', marginBottom: 3 }}>{boundName}</div>
+          <div style={{ fontSize: 11, color: '#777' }}>{bound.kind} · 已绑定</div>
+        </>
+      ) : (
+        <>
+          <div style={{ marginBottom: 3 }}>＋ 拖入媒体素材</div>
+          <div style={{ fontSize: 11, color: '#777' }}>从左侧素材库拖入</div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** 左上：效果控件 —— 视频循环 clip 的参数面板（关联素材 / 缩放 / 位置） */
+export default function EffectControls({ selectedClipId, project, getAsset, onUpdateClipParams, onBindAssetToClip }: EffectControlsProps): React.JSX.Element {
   // 查找选中的 clip
+  let selectedClip: Clip | null = null
   let selectedClipName: string | null = null
   if (selectedClipId) {
     for (const clips of Object.values(project.clips)) {
       const c = clips.find((x) => x.id === selectedClipId)
-      if (c) { selectedClipName = c.name; break }
+      if (c) { selectedClip = c; selectedClipName = c.name; break }
     }
+  }
+
+  // 是否为「视频循环」clip（视频类型 + 有 transform）
+  const isVideoLoop = !!selectedClip && selectedClip.type === 'video'
+  const t = selectedClip?.transform
+  // XY 关联（缩放联动）
+  const [linkXY, setLinkXY] = useState(false)
+
+  const setTransform = (patch: Partial<NonNullable<Clip['transform']>>): void => {
+    if (!selectedClipId) return
+    const next = { ...(t ?? { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }), ...patch }
+    onUpdateClipParams(selectedClipId, { transform: next })
   }
 
   return (
@@ -26,28 +162,49 @@ export default function EffectControls({ selectedClipId, project }: EffectContro
         <span>{selectedClipName ? selectedClipName : '(未选择剪辑)'}</span>
         <span className="dots">▣</span>
       </div>
-      <div
-        style={{
-          flex: 1,
-          minHeight: 0,
-          overflow: 'auto',
-          padding: 14,
-          color: 'var(--text-muted)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center'
-        }}
-      >
-        {selectedClipName ? (
-          <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
+
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14, color: 'var(--text-muted)' }}>
+        {!selectedClip ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-faint)' }}>
+            在时间轴中选择剪辑以查看效果控件
+          </div>
+        ) : isVideoLoop ? (
+          <div>
+            {/* 关联素材 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>关联素材</div>
+            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => onBindAssetToClip(selectedClipId, id)} />
+            <div style={{ fontSize: 11, color: '#888', margin: '6px 0 16px' }}>从素材库拖动媒体素材到上方槽位即可快速填充。</div>
+
+            {/* 缩放 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>缩放</div>
+            <NumberSlider label="X 缩放" value={t?.scaleX ?? 1} min={0.05} max={4} step={0.01} onChange={(v) => setTransform({ scaleX: v, ...(linkXY ? { scaleY: v } : {}) })} />
+            {!linkXY && (
+              <NumberSlider label="Y 缩放" value={t?.scaleY ?? 1} min={0.05} max={4} step={0.01} onChange={(v) => setTransform({ scaleY: v })} />
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14 }}>
+              <input
+                type="checkbox"
+                id="xy-link"
+                checked={linkXY}
+                onChange={(e) => setLinkXY(e.target.checked)}
+                style={{ accentColor: '#19a8ff' }}
+              />
+              <label htmlFor="xy-link" style={{ fontSize: 12, color: '#bbb' }}>XY 关联</label>
+            </div>
+
+            {/* 位置 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>位置</div>
+            <NumberSlider label="X 位置" value={t?.x ?? 0} min={-1} max={1} step={0.005} onChange={(v) => setTransform({ x: v })} />
+            <NumberSlider label="Y 位置" value={t?.y ?? 0} min={-1} max={1} step={0.005} onChange={(v) => setTransform({ y: v })} />
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', color: 'var(--text-secondary)', paddingTop: 40 }}>
             <div style={{ marginBottom: 8 }}>已选中剪辑</div>
             <div style={{ color: 'var(--accent)' }}>{selectedClipName}</div>
             <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-faint)' }}>
-              效果参数控件将在这里显示
+              该剪辑类型暂无可编辑参数（「视频循环」支持素材/缩放/位置）
             </div>
           </div>
-        ) : (
-          <div>在时间轴中选择剪辑以查看效果控件</div>
         )}
       </div>
     </div>

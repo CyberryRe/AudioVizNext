@@ -9,22 +9,25 @@ import {
   createProject,
   createTrack,
   createClip,
+  zoneForKind,
+  defaultTransform,
   type Project,
   type MediaAsset,
-  type ClipType
+  type ClipType,
+  type Transform
 } from './timeline'
 
 export function createDemoProject(): Project {
   const project = createProject({ fps: 30, stage: { width: 1920, height: 1080 } })
 
-  // 轨道（order 0 = 最顶）
-  const v2 = createTrack({ id: 'v2', name: 'V2', kind: 'video', order: 0 })
-  const v1 = createTrack({ id: 'v1', name: 'V1', kind: 'video', order: 1 })
-  const t1 = createTrack({ id: 't1', name: 'T1', kind: 'text', order: 2 })
-  const a1 = createTrack({ id: 'a1', name: 'A1', kind: 'audio', order: 3 })
+  // 轨道（order 0 = 最顶）。Pr 式：上 2 条视频轨（V2/V1），下 2 条音频轨（A1/A2）。
+  const v2 = createTrack({ id: 'v2', name: 'V2', kind: 'video', zone: 'video', order: 0 })
+  const v1 = createTrack({ id: 'v1', name: 'V1', kind: 'video', zone: 'video', order: 1 })
+  const a1 = createTrack({ id: 'a1', name: 'A1', kind: 'audio', zone: 'audio', order: 2 })
+  const a2 = createTrack({ id: 'a2', name: 'A2', kind: 'audio', zone: 'audio', order: 3 })
 
-  project.tracks = [v2, v1, t1, a1]
-  project.clips = { v2: [], v1: [], t1: [], a1: [] }
+  project.tracks = [v2, v1, a1, a2]
+  project.clips = { v2: [], v1: [], a1: [], a2: [] }
   project.version = 1
   return project
 }
@@ -79,6 +82,8 @@ export interface EffectTemplate {
   /** 默认颜色（UI 展示） */
   color?: string
   desc?: string
+  /** 默认变换（视频循环等 clip 自带变换参数） */
+  transform?: Transform
 }
 
 /**
@@ -93,7 +98,10 @@ export function createEffectCategories(): EffectCategory[] {
       name: '视频',
       icon: '▶',
       items: [
-        { id: 'tpl-video-loop', name: '视频循环', kind: 'video', clipType: 'video', durationFrames: 30 * 5, color: '#0b5eaa' },
+        {
+          id: 'tpl-video-loop', name: '视频循环', kind: 'video', clipType: 'video', durationFrames: 30 * 5, color: '#0b5eaa',
+          desc: '循环视频，可关联素材并设置缩放/位置', transform: defaultTransform()
+        },
         { id: 'tpl-video-transform', name: '视频变换', kind: 'video', clipType: 'video', durationFrames: 30 * 5, color: '#0b5eaa' }
       ]
     },
@@ -143,6 +151,7 @@ export function clipFromTemplate(tpl: EffectTemplate, trackId: string): ReturnTy
     sourceDurationFrames: tpl.durationFrames,
     src: tpl.clipType === 'text' ? undefined : `avn://template/${tpl.id}`,
     content: tpl.clipType === 'text' ? (tpl.desc ?? tpl.name) : undefined,
+    transform: tpl.transform,
     opacity: 1
   })
 }
