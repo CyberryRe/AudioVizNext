@@ -147,29 +147,31 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             const tr = l.transform
             const scaleX = tr?.scaleX ?? 1
             const scaleY = tr?.scaleY ?? 1
+            // 位置：相对画幅(遮罩)的比例，范围 -0.5..0.5（内容中心可在画幅内移动，画幅本身不动）
             const tx = tr?.x ?? 0
             const ty = tr?.y ?? 0
             return (
-              <video
+              <div
                 key={i}
-                ref={(el) => { videoRefs.current[i] = el }}
-                src={l.src}
-                muted
-                loop
-                playsInline
-                preload="metadata"
                 style={{
                   position: 'absolute',
-                  left: '50%',
-                  top: '50%',
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
+                  inset: 0,
+                  transform: `translate(${tx * 100}%, ${ty * 100}%) scale(${scaleX}, ${scaleY})`,
+                  transformOrigin: 'center',
                   opacity: l.opacity,
-                  transform: `translate(-50%, -50%) translate(${tx * 50}%, ${ty * 50}%) scale(${scaleX}, ${scaleY})`,
-                  transformOrigin: 'center'
+                  pointerEvents: 'none'
                 }}
-              />
+              >
+                <video
+                  ref={(el) => { videoRefs.current[i] = el }}
+                  src={l.src}
+                  muted
+                  loop
+                  playsInline
+                  preload="metadata"
+                  style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                />
+              </div>
             )
           })}
         </div>

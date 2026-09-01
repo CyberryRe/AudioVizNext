@@ -21,6 +21,8 @@ interface TimelineProps {
   onMoveClip: (clipId: string, newStart: number) => void
   onResizeClip: (clipId: string, newDuration: number) => void
   onMoveClipAcrossTracks: (clipId: string, targetTrackId: string, newStart: number, targetZone: TrackZone) => void
+  onAddVideoTrack: () => void
+  onAddAudioTrack: () => void
   getAsset: (id: string) => MediaAsset | undefined
 }
 
@@ -28,6 +30,7 @@ const TRACK_HEIGHT = 47
 const TRACK_CONTROL_WIDTH = 174
 const RULER_HEIGHT = 44
 const ZONE_HEADER_HEIGHT = 24
+const TOP_TOOLBAR_HEIGHT = 34 // 顶部留白工具条（添加轨道等）
 
 /** 轨道标签配色 */
 const TRACK_COLOR: Record<Track['kind'], string> = {
@@ -65,9 +68,10 @@ function readDragPayload(e: React.DragEvent): { template?: EffectTemplate; asset
 
 /**
  * 中下：时间轴 —— Pr 式双区布局。
- * 上：视频区（V2/V1…，可折叠、独立滚动，拖到最顶自动新建视频轨）
- * 下：音频区（A1/A2…，可折叠、独立滚动）
- * 支持：跨轨拖动（水平 + 垂直）、播放头拖动、拖拽模板/素材落轨、滚轮缩放。
+ * 上：视频区（V2/V1…，可折叠、独立纵向滚动）
+ * 下：音频区（A1/A2…，可折叠、独立纵向滚动）
+ * 横向滚动统一在父容器，标尺/轨道/播放头一起滚，避免逐区水平滑块 + 缩放后刻度错乱。
+ * 顶部留白工具条提供「添加视频轨 / 添加音频轨」按钮。
  */
 export default function Timeline({
   project,
@@ -87,11 +91,18 @@ export default function Timeline({
   onMoveClip,
   onResizeClip,
   onMoveClipAcrossTracks,
+  onAddVideoTrack,
+  onAddAudioTrack,
   getAsset
 }: TimelineProps): React.JSX.Element {
   const fps = project.fps
   const totalPx = total * pxPerFrame
-  const timeAreaRef = useRef<HTMLDivElement>(null)
+  // 横向滚动容器 + 当前滚动量 ref
+  const hScrollRef = useRef<HTMLDivElement>(null)
+  const scrollLeftRef = useRef(0)
+  // 当前 pxPerFrame 镜像（供缩放锚点同步计算）
+  const pxRef = useRef(pxPerFrame)
+  pxRef.current = pxPerFrame
 
   const [videoCollapsed, setVideoCollapsed] = useState(false)
   const [audioCollapsed, setAudioCollapsed] = useState(false)
@@ -99,11 +110,46 @@ export default function Timeline({
   const videoTracks = project.tracks.filter((t) => t.zone === 'video')
   const audioTracks = project.tracks.filter((t) => t.zone === 'audio')
 
+  // 帧 → 内容内 x（相对时间内容左缘，含滚动）
+  const frameToContentX = (frame: number): number => frame * pxPerFrame
+  // 客户端 x → 帧（考虑横向滚动）
   const frameFromEvent = (clientX: number): number => {
-    const el = timeAreaRef.current
+    const el = hScrollRef.current
     if (!el) return 0
     const rect = el.getBoundingClientRect()
-    return Math.max(0, Math.round((clientX - rect.left) / pxPerFrame))
+    const contentX = clientX - rect.left + el.scrollLeft
+    return Math.max(0, Math.round(contentX / pxRef.current))
+  }
+
+  // 记录滚动量
+  const onScroll = (): void => {
+    if (hScrollRef.current) scrollLeftRef.current = hScrollRef.current.scrollLeft
+  }
+
+  /** 缩放并让光标下的帧保持在光标位置（锚点缩放） */
+  const zoomAt = (clientX: number, dir: 1 | -1): void => {
+    const el = hScrollRef.current
+    const oldPx = pxRef.current
+    const rect = el?.getBoundingClientRect()
+    const cursorContentX = rect ? clientX - rect.left + el!.scrollLeft : 0
+    const frameAtCursor = cursorContentX / oldPx
+    const newPx = dir === 1 ? Math.min(3, oldPx * 1.25) : Math.max(0.1, oldPx / 1.25)
+    if (dir === 1) onZoomIn()
+    else onZoomOut()
+    // 下一帧渲染后把滚动量对齐，使 frameAtCursor 落在原屏幕位置
+    requestAnimationFrame(() => {
+      if (!el) return
+      const target = frameAtCursor * newPx - (rect ? clientX - rect.left : 0)
+      el.scrollLeft = Math.max(0, target)
+      scrollLeftRef.current = el.scrollLeft
+    })
+  }
+
+  const handleWheel = (e: React.WheelEvent): void => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault()
+      zoomAt(e.clientX, e.deltaY < 0 ? 1 : -1)
+    }
   }
 
   const handlePlayheadDrag = (e: React.MouseEvent): void => {
@@ -117,14 +163,6 @@ export default function Timeline({
     window.addEventListener('mousemove', seek)
     window.addEventListener('mouseup', up)
     document.body.style.cursor = 'ew-resize'
-  }
-
-  // 滚轮缩放时间轴（Ctrl/⌘ + 滚轮）
-  const handleWheel = (e: React.WheelEvent): void => {
-    if (!e.ctrlKey && !e.metaKey) return
-    e.preventDefault()
-    if (e.deltaY < 0) onZoomIn()
-    else onZoomOut()
   }
 
   const handleDragOver = (e: React.DragEvent): void => {
@@ -148,14 +186,15 @@ export default function Timeline({
     ;(window as unknown as Record<string, unknown>)._avsPendingDrag = undefined
   }
 
-  // 由全局 Y 推断落点轨道 id（跨区）
+  // 由全局 Y 推断落点轨道 id（跨区，考虑顶部工具条偏移）
   const trackIdAtY = (clientY: number): string | undefined => {
-    const el = timeAreaRef.current
+    const el = hScrollRef.current
     if (!el) return undefined
     const rect = el.getBoundingClientRect()
-    let y = clientY - rect.top - RULER_HEIGHT
+    let y = clientY - rect.top
     if (y < 0) return undefined
 
+    // 视频区
     if (!videoCollapsed) {
       y -= ZONE_HEADER_HEIGHT
       const vIdx = Math.floor(y / TRACK_HEIGHT)
@@ -164,7 +203,7 @@ export default function Timeline({
     } else {
       y -= ZONE_HEADER_HEIGHT
     }
-
+    // 音频区
     if (!audioCollapsed) {
       y -= ZONE_HEADER_HEIGHT
       const aIdx = Math.floor(y / TRACK_HEIGHT)
@@ -173,6 +212,9 @@ export default function Timeline({
     return undefined
   }
 
+  // 内容宽度（至少撑满可视区，避免内容短时右侧空白不可点）
+  const contentWidth = Math.max(totalPx, 1)
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div className="tabline">
@@ -180,15 +222,29 @@ export default function Timeline({
         <span style={{ marginLeft: 'auto', color: '#888', cursor: 'pointer', fontSize: 14 }} title="时间轴设置">☰</span>
       </div>
 
-      <div
-        ref={timeAreaRef}
-        onWheel={handleWheel}
-        style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: `${TRACK_CONTROL_WIDTH}px 1fr`, position: 'relative' }}
-      >
-        {/* ===== 左侧：轨道控制 ===== */}
+      {/* 顶部留白工具条：添加轨道 */}
+      <div style={{ height: TOP_TOOLBAR_HEIGHT, flex: 'none', borderBottom: '1px solid var(--border-dark)', background: 'var(--bg-panel-head)', display: 'flex', alignItems: 'center', gap: 8, padding: '0 10px', color: '#bbb', fontSize: 12 }}>
+        <span
+          onClick={onAddVideoTrack}
+          title="添加视频轨道"
+          style={{ cursor: 'pointer', padding: '3px 10px', background: 'var(--track-video)', color: '#fff', borderRadius: 3, fontSize: 12, fontWeight: 600 }}
+        >
+          ＋ 视频轨
+        </span>
+        <span
+          onClick={onAddAudioTrack}
+          title="添加音频轨道"
+          style={{ cursor: 'pointer', padding: '3px 10px', background: 'var(--track-audio)', color: '#fff', borderRadius: 3, fontSize: 12, fontWeight: 600 }}
+        >
+          ＋ 音频轨
+        </span>
+        <span style={{ marginLeft: 'auto', opacity: 0.7 }}>Ctrl+滚轮 / − + 缩放 · ←→ 步进 · Del 删除</span>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: `${TRACK_CONTROL_WIDTH}px 1fr`, position: 'relative' }}>
+        {/* ===== 左侧：轨道控制（固定，不随横向滚动） ===== */}
         <div style={{ background: 'var(--bg-track-controls)', borderRight: '1px solid var(--border-dark)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div style={{ height: RULER_HEIGHT, borderBottom: '1px solid var(--border-dark)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', gap: 8, fontSize: 12 }}>
-            <span title="添加轨道" style={{ cursor: 'pointer' }}>▣</span>
             <span title="吸附" style={{ cursor: 'pointer' }}>⚓</span>
             <span title="链接" style={{ cursor: 'pointer' }}>🔗</span>
             <span title="轨道设置" style={{ cursor: 'pointer' }}>🔧</span>
@@ -198,65 +254,70 @@ export default function Timeline({
           <ZoneControls zone="audio" tracks={audioTracks} collapsed={audioCollapsed} onToggleCollapse={() => setAudioCollapsed((c) => !c)} onToggleTrack={onToggleTrack} />
         </div>
 
-        {/* ===== 右侧：时间区 ===== */}
+        {/* ===== 右侧：横向滚动容器（标尺 + 双区轨道行 一起横向滚动） ===== */}
         <div
-          style={{ overflow: 'hidden', position: 'relative', background: 'var(--bg-timeline)', cursor: 'crosshair' }}
+          ref={hScrollRef}
+          onScroll={onScroll}
+          onWheel={handleWheel}
+          style={{ overflowX: 'auto', overflowY: 'hidden', position: 'relative', background: 'var(--bg-timeline)', cursor: 'crosshair' }}
           onDragOver={handleDragOver}
           onDrop={handleDrop}
         >
-          <Ruler total={total} fps={fps} pxPerFrame={pxPerFrame} onSeek={onSeek} frameFromEvent={frameFromEvent} />
+          <div style={{ position: 'relative', width: contentWidth, minWidth: '100%' }}>
+            <Ruler total={total} fps={fps} pxPerFrame={pxPerFrame} onSeek={onSeek} frameFromEvent={frameFromEvent} />
 
-          {/* 视频区轨道行（折叠时仍保留头部占位，与左控制列对齐） */}
-          <ZoneRows
-            zone="video"
-            tracks={videoTracks}
-            clips={project.clips}
-            pxPerFrame={pxPerFrame}
-            selectedClipId={selectedClipId}
-            onSelectClip={onSelectClip}
-            onMoveClip={onMoveClip}
-            onResizeClip={onResizeClip}
-            onMoveClipAcrossTracks={onMoveClipAcrossTracks}
-            getAsset={getAsset}
-            onSeek={onSeek}
-            frameFromEvent={frameFromEvent}
-            topOffset={RULER_HEIGHT}
-            collapsed={videoCollapsed}
-          />
-          <ZoneRows
-            zone="audio"
-            tracks={audioTracks}
-            clips={project.clips}
-            pxPerFrame={pxPerFrame}
-            selectedClipId={selectedClipId}
-            onSelectClip={onSelectClip}
-            onMoveClip={onMoveClip}
-            onResizeClip={onResizeClip}
-            onMoveClipAcrossTracks={onMoveClipAcrossTracks}
-            getAsset={getAsset}
-            onSeek={onSeek}
-            frameFromEvent={frameFromEvent}
-            topOffset={RULER_HEIGHT + ZONE_HEADER_HEIGHT + (videoCollapsed ? 0 : videoTracks.length * TRACK_HEIGHT)}
-            collapsed={audioCollapsed}
-          />
+            {/* 视频区轨道行 */}
+            <ZoneRows
+              zone="video"
+              tracks={videoTracks}
+              clips={project.clips}
+              pxPerFrame={pxPerFrame}
+              selectedClipId={selectedClipId}
+              onSelectClip={onSelectClip}
+              onMoveClip={onMoveClip}
+              onResizeClip={onResizeClip}
+              onMoveClipAcrossTracks={onMoveClipAcrossTracks}
+              getAsset={getAsset}
+              onSeek={onSeek}
+              frameFromEvent={frameFromEvent}
+              topOffset={RULER_HEIGHT}
+              collapsed={videoCollapsed}
+            />
+            {/* 音频区轨道行 */}
+            <ZoneRows
+              zone="audio"
+              tracks={audioTracks}
+              clips={project.clips}
+              pxPerFrame={pxPerFrame}
+              selectedClipId={selectedClipId}
+              onSelectClip={onSelectClip}
+              onMoveClip={onMoveClip}
+              onResizeClip={onResizeClip}
+              onMoveClipAcrossTracks={onMoveClipAcrossTracks}
+              getAsset={getAsset}
+              onSeek={onSeek}
+              frameFromEvent={frameFromEvent}
+              topOffset={RULER_HEIGHT + ZONE_HEADER_HEIGHT + (videoCollapsed ? 0 : videoTracks.length * TRACK_HEIGHT)}
+              collapsed={audioCollapsed}
+            />
 
-          <div
-            onMouseDown={handlePlayheadDrag}
-            style={{
-              position: 'absolute',
-              top: 0,
-              bottom: 0,
-              width: 1,
-              background: 'var(--accent-playhead)',
-              left: playheadFrame * pxPerFrame,
-              zIndex: 4,
-              cursor: 'ew-resize'
-            }}
-          >
-            <div style={{ position: 'absolute', top: 0, left: -4, borderLeft: '5px solid transparent', borderRight: '5px solid transparent', borderTop: '9px solid #18a8ff', cursor: 'ew-resize' }} />
+            {/* 播放头（随内容横向滚动） */}
+            <div
+              onMouseDown={handlePlayheadDrag}
+              style={{
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                width: 1,
+                background: 'var(--accent-playhead)',
+                left: playheadFrame * pxPerFrame,
+                zIndex: 4,
+                cursor: 'ew-resize'
+              }}
+            >
+              <div style={{ position: 'absolute', top: 0, left: -4, borderLeft: '5px solid transparent', borderRight: '5px solid transparent', borderTop: '9px solid #18a8ff', cursor: 'ew-resize' }} />
+            </div>
           </div>
-
-          <div style={{ position: 'absolute', left: 0, top: RULER_HEIGHT, width: Math.max(totalPx, 1), height: 1 }} />
         </div>
       </div>
 
@@ -269,7 +330,7 @@ export default function Timeline({
         <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
           <span style={{ cursor: 'pointer' }} onClick={onZoomOut} title="缩小时间轴">−</span>
           <span style={{ cursor: 'pointer' }} onClick={onZoomIn} title="放大时间轴">+</span>
-          <span style={{ opacity: 0.7, fontSize: 12 }}>Ctrl+滚轮 / − + 缩放 · ←→ 步进</span>
+          <span style={{ opacity: 0.7, fontSize: 12 }}>{Math.round(pxPerFrame * 100)} %</span>
         </span>
       </div>
     </div>
@@ -307,7 +368,7 @@ function Ruler({ total, fps, pxPerFrame, onSeek, frameFromEvent }: {
   )
 }
 
-/** 左侧某分区控制块：可折叠 + 独立滚动 */
+/** 左侧某分区控制块：可折叠 + 独立纵向滚动 */
 function ZoneControls({ zone, tracks, collapsed, onToggleCollapse, onToggleTrack }: {
   zone: TrackZone
   tracks: Track[]
@@ -394,7 +455,7 @@ function TrackControlRow({ track, onToggleTrack }: {
   )
 }
 
-/** 右侧某分区轨道行。topOffset = 该区在时间区内的 Y 起点（含标尺）。collapsed 时只显示折叠头。 */
+/** 右侧某分区轨道行（纵向独立滚动，横向随父容器滚动）。topOffset = 区内 Y 起点。collapsed 时只显示折叠头。 */
 function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectClip, onMoveClip, onResizeClip, onMoveClipAcrossTracks, getAsset, onSeek, frameFromEvent, topOffset, collapsed }: {
   zone: TrackZone
   tracks: Track[]
@@ -414,7 +475,6 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
   const zoneHeight = collapsed ? ZONE_HEADER_HEIGHT : ZONE_HEADER_HEIGHT + tracks.length * TRACK_HEIGHT
 
   // 跨轨拖动的目标解析：由 Y 坐标找所在轨道行（同区）。
-  // 视频区拖到最顶（第一轨上方）→ 返回 '__new__'，由 App 自动新建视频轨。
   const resolveTargetByY = (clientY: number): { trackId: string | null; isNewTop: boolean } => {
     const rows = Array.from(
       document.querySelectorAll<HTMLElement>(`[data-zone="${zone}"][data-trackid]`)
@@ -434,7 +494,18 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
   }
 
   return (
-    <div style={{ position: 'absolute', left: 0, right: 0, top: topOffset, height: zoneHeight, overflowY: 'auto' }}>
+    <div
+      style={{
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        top: topOffset,
+        height: zoneHeight,
+        // 纵向独立滚动；横向隐藏（随父容器一起滚）
+        overflowY: 'auto',
+        overflowX: 'hidden'
+      }}
+    >
       <div style={{ height: ZONE_HEADER_HEIGHT, borderBottom: '1px solid var(--border-row)', background: 'var(--bg-zone-header)', display: 'flex', alignItems: 'center', gap: 7, padding: '0 8px', color: '#888', fontSize: 11 }}>
         <span style={{ width: 8, height: 8, borderRadius: 2, background: zone === 'video' ? 'var(--track-video)' : 'var(--track-audio)' }} />
         {zone === 'video' ? '视频轨道区（拖到上方可自动新建视频轨）' : '音频轨道区'}
@@ -444,7 +515,7 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
           key={track.id}
           data-zone={zone}
           data-trackid={track.id}
-          style={{ height: TRACK_HEIGHT, borderBottom: '1px solid var(--border-row)', position: 'relative' }}
+          style={{ height: TRACK_HEIGHT, borderBottom: '1px solid var(--border-row)', position: 'relative', width: '100%' }}
           onClick={(e) => { e.stopPropagation(); onSeek(frameFromEvent(e.clientX)) }}
         >
           {(clips[track.id] ?? []).map((clip) => (
@@ -460,7 +531,6 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
               resolveTargetByY={resolveTargetByY}
               onCrossMove={(targetTrackId, newStart, isNewTop) => {
                 if (isNewTop) {
-                  // 新建视频轨：传给 App 一个占位 id，App 自动建轨
                   onMoveClipAcrossTracks(clip.id, '__new-video-track__', newStart, zone)
                 } else if (targetTrackId && targetTrackId !== track.id) {
                   onMoveClipAcrossTracks(clip.id, targetTrackId, newStart, zone)
@@ -515,16 +585,7 @@ function ClipBlock({ clip, track, pxPerFrame, selected, onSelect, onMove, onResi
         onCrossMove(trackId, newStart, false)
         return
       }
-      if (trackId === lastTarget && !isNewTop) {
-        onMove(newStart)
-        return
-      }
-      if (!trackId && !isNewTop) {
-        onMove(newStart)
-        return
-      }
-      // 已在新轨目标上，仅水平推进
-      onCrossMove(lastTarget === '__new__' ? null : lastTarget, newStart, lastTarget === '__new__')
+      onMove(newStart)
     }
     const up = (): void => {
       window.removeEventListener('mousemove', move)
@@ -582,7 +643,7 @@ function ClipBlock({ clip, track, pxPerFrame, selected, onSelect, onMove, onResi
         userSelect: 'none',
         touchAction: 'none'
       }}
-      title={`${boundName}（拖动移动/跨轨，拖右缘调整时长）`}
+      title={`${boundName}（拖动移动/跨轨，拖右缘调整时长，Del 删除）`}
     >
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none' }}>{boundName}</span>
       <div

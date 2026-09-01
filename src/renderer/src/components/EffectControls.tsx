@@ -192,10 +192,11 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
               <label htmlFor="xy-link" style={{ fontSize: 12, color: '#bbb' }}>XY 关联</label>
             </div>
 
-            {/* 位置 */}
+            {/* 位置（在画幅内移动素材，画幅本身固定） */}
             <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>位置</div>
-            <NumberSlider label="X 位置" value={t?.x ?? 0} min={-1} max={1} step={0.005} onChange={(v) => setTransform({ x: v })} />
-            <NumberSlider label="Y 位置" value={t?.y ?? 0} min={-1} max={1} step={0.005} onChange={(v) => setTransform({ y: v })} />
+            <NumberSlider label="X 位置" value={t?.x ?? 0} min={-0.5} max={0.5} step={0.005} onChange={(v) => setTransform({ x: v })} />
+            <NumberSlider label="Y 位置" value={t?.y ?? 0} min={-0.5} max={0.5} step={0.005} onChange={(v) => setTransform({ y: v })} />
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>素材在画幅内移动，画幅（遮罩）固定不变。</div>
           </div>
         ) : (
           <div style={{ textAlign: 'center', color: 'var(--text-secondary)', paddingTop: 40 }}>

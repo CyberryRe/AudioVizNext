@@ -17,8 +17,10 @@ import {
   addClipToTrack,
   moveClip,
   resizeClip,
+  deleteClip,
   moveClipAcrossTracks,
   addVideoTrack,
+  addAudioTrack,
   assetFromFile,
   bindAssetToClip,
   STAGE_RATIOS,
@@ -176,6 +178,38 @@ export default function App(): React.JSX.Element {
     }))
   }, [])
 
+  // ===== 操作：删除选中 clip（Delete/Backspace） =====
+  const handleDeleteClip = useCallback((clipId: string | null) => {
+    if (!clipId) return
+    setProject((prev) => {
+      const nextClips: Record<string, Clip[]> = {}
+      let touched = false
+      for (const [tid, clips] of Object.entries(prev.clips)) {
+        const filtered = deleteClip(clips, clipId)
+        if (filtered.length !== clips.length) touched = true
+        nextClips[tid] = filtered
+      }
+      if (!touched) return prev
+      return { ...prev, clips: nextClips, version: prev.version + 1 }
+    })
+    setSelectedClipId(null)
+  }, [])
+
+  // ===== 操作：手动新增视频轨 / 音频轨 =====
+  const handleAddVideoTrack = useCallback(() => {
+    setProject((prev) => {
+      const { tracks, track } = addVideoTrack(prev.tracks)
+      return { ...prev, tracks, clips: { ...prev.clips, [track.id]: [] }, version: prev.version + 1 }
+    })
+  }, [])
+
+  const handleAddAudioTrack = useCallback(() => {
+    setProject((prev) => {
+      const { tracks, track } = addAudioTrack(prev.tracks)
+      return { ...prev, tracks, clips: { ...prev.clips, [track.id]: [] }, version: prev.version + 1 }
+    })
+  }, [])
+
   // ===== 操作：同轨移动 clip =====
   const handleMoveClip = useCallback((clipId: string, newStart: number) => {
     setProject((prev) => {
@@ -291,6 +325,12 @@ export default function App(): React.JSX.Element {
 
       if (e.key === ' ') { e.preventDefault(); setIsPlaying((p) => !p); return }
 
+      // Delete / Backspace 删除选中 clip
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedClipId) { e.preventDefault(); handleDeleteClip(selectedClipId) }
+        return
+      }
+
       if (e.key === 'ArrowLeft') {
         if (e.ctrlKey || e.metaKey) { setPlayheadFrame((f) => Math.max(0, f - 5 * project.fps)); e.preventDefault() }
         else { setPlayheadFrame((f) => Math.max(0, f - 1)); e.preventDefault() }
@@ -307,7 +347,7 @@ export default function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [zoomIn, zoomOut, resetZoom, project.fps])
+  }, [zoomIn, zoomOut, resetZoom, project.fps, selectedClipId, handleDeleteClip])
 
   return (
     <div className="app">
@@ -381,6 +421,8 @@ export default function App(): React.JSX.Element {
             onMoveClip={handleMoveClip}
             onResizeClip={handleResizeClip}
             onMoveClipAcrossTracks={handleMoveClipAcrossTracks}
+            onAddVideoTrack={handleAddVideoTrack}
+            onAddAudioTrack={handleAddAudioTrack}
             getAsset={getAsset}
           />
         </section>

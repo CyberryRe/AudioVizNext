@@ -289,6 +289,22 @@ export function moveClip(clips: Clip[], clipId: string, newStart: number): Clip[
   return sortClips([...others, { ...target, startFrame: start }])
 }
 
+/** 删除某轨中指定 clip，返回新的 clips 数组（不可变）。clip 不存在则原样返回。 */
+export function deleteClip(clips: Clip[], clipId: string): Clip[] {
+  return clips.filter((c) => c.id !== clipId)
+}
+
+/**
+ * 新增一条音频轨：追加到现有音频轨之下（order = max+1）。
+ * 返回新的 tracks 数组与新建轨道。
+ */
+export function addAudioTrack(tracks: Track[], overrides?: Partial<Track>): { tracks: Track[]; track: Track } {
+  const audioTracks = tracks.filter((t) => t.zone === 'audio')
+  const maxOrder = audioTracks.reduce((m, t) => Math.max(m, t.order), -1)
+  const track = createTrack({ kind: 'audio', zone: 'audio', order: maxOrder + 1, name: `A${audioTracks.length + 1}`, ...overrides })
+  return { tracks: [...tracks, track], track }
+}
+
 /** 同轨调整 clip 时长：改变 durationFrames（至少 1 帧），右侧相邻 clip 不重叠。 */
 export function resizeClip(clips: Clip[], clipId: string, newDuration: number): Clip[] {
   const target = clips.find((c) => c.id === clipId)
