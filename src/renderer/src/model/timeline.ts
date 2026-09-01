@@ -88,15 +88,51 @@ export interface Clip {
   /** 该 clip 的时长受源素材时长上限约束（如「单次播放」）。 */
   clampToSource?: boolean
 
+  /** 歌词类 clip 的样式配置（滚动歌词等） */
+  lyrics?: LyricStyle
+  /** 是否为歌词类 clip（滚动歌词等） */
+  isLyrics?: boolean
+
   // 标志
   locked?: boolean
   disabled?: boolean
 }
 
+/** 歌词样式（滚动歌词 clip 的可编辑项） */
+export interface LyricStyle {
+  /** 字体族 */
+  fontFamily?: string
+  /** 对齐：left / center / right */
+  align?: 'left' | 'center' | 'right'
+  /** 字号（px，相对画幅高度比例？存画幅归一化便于导出缩放） */
+  fontSize?: number
+  /** 缩放大小（整体缩放倍率） */
+  scale?: number
+  /** 字颜色 */
+  color?: string
+  /** 辉光开关 */
+  glowEnabled?: boolean
+  /** 辉光颜色 */
+  glowColor?: string
+}
+
+/** 歌词默认样式 */
+export function defaultLyricStyle(): LyricStyle {
+  return {
+    fontFamily: 'sans-serif',
+    align: 'center',
+    fontSize: 48,
+    scale: 1,
+    color: '#ffffff',
+    glowEnabled: true,
+    glowColor: '#00e5ff'
+  }
+}
+
 /** 素材 */
 export interface MediaAsset {
   id: string
-  kind: 'video' | 'audio' | 'image'
+  kind: 'video' | 'audio' | 'image' | 'lyrics'
   name: string
   src: string
   durationSec: number
@@ -106,6 +142,8 @@ export interface MediaAsset {
   thumbnailUrl?: string
   byteSize: number
   addedAt: number
+  /** 歌词类素材：LRC 文本内容 */
+  textContent?: string
 }
 
 // ===== Scene（resolveTimeline 输出） =====
@@ -231,6 +269,7 @@ export function createClip(overrides?: Partial<Clip>): Clip {
     sourceDurationFrames: 30,
     volume: 1,
     opacity: 1,
+    lyrics: defaultLyricStyle(),
     ...overrides
   }
 }
@@ -335,12 +374,65 @@ export function kindFromFileName(name: string): MediaAsset['kind'] {
   if (['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v'].includes(ext)) return 'video'
   if (['mp3', 'wav', 'flac', 'm4a', 'ogg', 'aac'].includes(ext)) return 'audio'
   if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) return 'image'
+  if (['lrc', 'srt', 'txt'].includes(ext)) return 'lyrics'
   return 'image'
 }
 
 /** 默认 clip 变换（归一化：x/y 为相对画布中心的偏移比例，scaleX/Y 为缩放） */
 export function defaultTransform(): Transform {
   return { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }
+}
+
+/** 一行 LRC 歌词 */
+export interface LrcLine {
+  time: number // 秒
+  text: string
+}
+
+/**
+ * 解析 LRC 文本 → 按时间排序的歌词行数组。
+ * 支持 `[mm:ss.xx]` / `[mm:ss]` 多时间标签、空行跳过、无标签纯文本行当作第 0 秒。
+ */
+export function parseLrc(text: string | undefined): LrcLine[] {
+  if (!text) return []
+  const lines = text.split(/\r?\n/)
+  const out: LrcLine[] = []
+  const timeRe = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line) continue
+    const times: number[] = []
+    let m: RegExpExecArray | null
+    timeRe.lastIndex = 0
+    while ((m = timeRe.exec(line)) !== null) {
+      const min = parseInt(m[1], 10)
+      const sec = parseInt(m[2], 10)
+      const fracRaw = m[3] ?? '0'
+      // 兼容 .xx（毫秒两位）与 .xxx（毫秒三位）
+      const frac = fracRaw.length <= 2 ? parseInt(fracRaw, 10) / 100 : parseInt(fracRaw, 10) / 1000
+      times.push(min * 60 + sec + frac)
+    }
+    const body = line.replace(timeRe, '').trim()
+    if (times.length > 0) {
+      for (const t of times) {
+        if (body) out.push({ time: t, text: body })
+      }
+    } else if (body) {
+      // 无时间标签 → 放第 0 秒（滚动歌词会默认显示）
+      out.push({ time: 0, text: body })
+    }
+  }
+  return out.sort((a, b) => a.time - b.time)
+}
+
+/** 依据给定秒数取当前应显示的歌词行（滚动歌词：最后一条 time <= sec 的行；无则空串）。 */
+export function lrcLineAt(lines: LrcLine[], sec: number): string {
+  let current = ''
+  for (const l of lines) {
+    if (l.time <= sec) current = l.text
+    else break
+  }
+  return current
 }
 
 /**
@@ -359,7 +451,8 @@ export function bindAssetToClip(
     (clip.type === 'video' && asset.kind === 'video') ||
     (clip.type === 'video' && asset.kind === 'image') ||
     (clip.type === 'image' && asset.kind === 'image') ||
-    (clip.type === 'audio' && asset.kind === 'audio')
+    (clip.type === 'audio' && asset.kind === 'audio') ||
+    (clip.type === 'text' && asset.kind === 'lyrics')
   if (!compatible) return null
 
   const src = asset.src
@@ -370,11 +463,17 @@ export function bindAssetToClip(
 
   // 「单次播放」类 clip：绑定后时长扩展到源素材完整时长（时间轴 Clip 随之变长），
   // 同时设 maxDurationFrames = 源完整时长，作为拖尾调整的上限（拉满即停）。
+  // 若无法取得源时长（探测失败）→ 不设上限，允许用户手动拖到任意长度。
   let maxDurationFrames = clip.maxDurationFrames
   let durationFrames = clip.durationFrames
-  if (clip.clampToSource && assetFrames) {
-    maxDurationFrames = assetFrames
-    durationFrames = assetFrames
+  if (clip.clampToSource) {
+    if (assetFrames) {
+      maxDurationFrames = assetFrames
+      durationFrames = assetFrames
+    } else {
+      // 源时长未知：去掉模板默认上限，避免"拖不动"
+      maxDurationFrames = undefined
+    }
   } else if (isTemplate && assetFrames) {
     // 普通模板位（如视频循环）→ 时长对齐源素材
     durationFrames = assetFrames
@@ -388,7 +487,9 @@ export function bindAssetToClip(
     durationFrames,
     maxDurationFrames,
     sourceDurationFrames: isTemplate && assetFrames ? assetFrames : clip.sourceDurationFrames,
-    sourceStartFrame: clip.sourceStartFrame ?? 0
+    sourceStartFrame: clip.sourceStartFrame ?? 0,
+    // 歌词类素材 → 把 LRC 文本写入 clip.content（供渲染逐句解析）
+    content: clip.type === 'text' && asset.textContent != null ? asset.textContent : clip.content
   }
   return next
 }

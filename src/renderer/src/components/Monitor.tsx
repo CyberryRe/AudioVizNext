@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Project } from '../model/timeline'
-import { resolveTimeline } from '../model/timeline'
+import type { Project, Clip } from '../model/timeline'
+import { resolveTimeline, parseLrc, lrcLineAt } from '../model/timeline'
 import { formatTimecode } from '../model/demo'
 
 interface MonitorProps {
@@ -103,6 +103,24 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
   textLayers.sort((a, b) => a.z - b.z)
   // 音频 clip（不可见，仅用于发声）
   const audioLayers = scene.audios.map((a) => ({ src: a.src, volume: a.volume, sourceFrame: a.sourceFrame }))
+
+  // clip 查找表（按 id），用于拿歌词样式等原始 clip 属性
+  const clipLookup = useRef<Map<string, Clip>>(new Map())
+  clipLookup.current.clear()
+  for (const clips of Object.values(project.clips)) {
+    for (const c of clips) clipLookup.current.set(c.id, c)
+  }
+
+  // 渲染歌词行：若是歌词 clip，则按当前帧源秒数解析出当前句
+  const lyricTextFor = (id: string, sourceFrame: number): { text: string; isLyrics: boolean } => {
+    const clip = clipLookup.current.get(id)
+    if (clip?.isLyrics) {
+      const sec = sourceFrame / fps
+      const lines = parseLrc(clip.content)
+      return { text: lrcLineAt(lines, sec), isLyrics: true }
+    }
+    return { text: clip?.content ?? '', isLyrics: false }
+  }
 
   // 播放状态 → 控制预览视频播放/暂停（未点播放时不自动播放）
   useEffect(() => {
@@ -234,27 +252,45 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             background: 'rgba(0,0,0,0.02)'
           }}
         >
-          {/* 文字层：属于输出内容，绘制在画幅内 */}
-          {textLayers.length > 0 && textLayers.map((l) => (
-            <div
-              key={l.clip.id}
-              style={{
-                position: 'absolute',
-                inset: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#fff',
-                fontSize: 48,
-                fontWeight: 700,
-                opacity: l.clip.opacity,
-                textShadow: '0 2px 8px rgba(0,0,0,.6)',
-                pointerEvents: 'none'
-              }}
-            >
-              {l.clip.content}
-            </div>
-          ))}
+          {/* 文字层：属于输出内容，绘制在画幅内（歌词 clip 按样式+当前句渲染） */}
+          {textLayers.length > 0 && textLayers.map((l) => {
+            const clip = clipLookup.current.get(l.clip.id)
+            const ly = lyricTextFor(l.clip.id, l.clip.sourceFrame)
+            const s = clip?.lyrics
+            const isLyric = clip?.isLyrics
+            const fontSize = (s?.fontSize ?? 48) * (s?.scale ?? 1)
+            const align = s?.align ?? 'center'
+            const color = s?.color ?? '#ffffff'
+            const glowOn = s?.glowEnabled ?? true
+            const glowColor = s?.glowColor ?? '#00e5ff'
+            return (
+              <div
+                key={l.clip.id}
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center',
+                  padding: '0 40px',
+                  color,
+                  fontFamily: s?.fontFamily ?? 'sans-serif',
+                  fontSize,
+                  fontWeight: 700,
+                  lineHeight: 1.4,
+                  textAlign: align,
+                  opacity: l.clip.opacity,
+                  whiteSpace: 'pre-wrap',
+                  pointerEvents: 'none',
+                  textShadow: glowOn
+                    ? `0 0 ${Math.max(6, fontSize * 0.15)}px ${glowColor}, 0 0 ${Math.max(18, fontSize * 0.4)}px ${glowColor}`
+                    : '0 2px 8px rgba(0,0,0,.6)'
+                }}
+              >
+                {isLyric ? (ly.text || ' ') : (l.clip.content ?? '')}
+              </div>
+            )
+          })}
           {mediaLayers.length === 0 && textLayers.length === 0 && (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#444', fontSize: 13 }}>
               无素材 · 黑色窗口即输出画幅(Mask)

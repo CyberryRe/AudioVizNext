@@ -62,6 +62,34 @@ function zoneForAsset(kind: MediaAsset['kind']): TrackZone {
   return kind === 'audio' ? 'audio' : 'video'
 }
 
+/**
+ * 探测媒体文件真实时长（秒）。用 <video>/<audio> 加载 blob 读取 duration。
+ * 失败或超时返回 0（调用方回退为模板默认时长）。
+ */
+function probeMediaDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const kind = file.name.split('.').pop()?.toLowerCase() ?? ''
+    const isAudio = ['mp3', 'wav', 'flac', 'm4a', 'ogg', 'aac'].includes(kind)
+    const el = isAudio ? document.createElement('audio') : document.createElement('video')
+    const url = URL.createObjectURL(file)
+    let settled = false
+    const done = (d: number): void => {
+      if (settled) return
+      settled = true
+      URL.revokeObjectURL(url)
+      el.removeAttribute('src')
+      el.load()
+      resolve(d)
+    }
+    el.preload = 'metadata'
+    el.onloadedmetadata = () => done(Number.isFinite(el.duration) ? el.duration : 0)
+    el.onerror = () => done(0)
+    el.src = url
+    // 超时兜底（5s），避免个别文件卡住
+    window.setTimeout(() => done(0), 5000)
+  })
+}
+
 /** 在某分区找到第一条轨道 id（用于默认落点） */
 function firstTrackIdInZone(project: Project, zone: TrackZone): string {
   const t = project.tracks.find((x) => x.zone === zone)
@@ -118,10 +146,22 @@ export default function App(): React.JSX.Element {
     }))
   }, [])
 
-  // ===== 操作：本地文件拖入素材库 =====
-  const handleImportFiles = useCallback((files: File[]) => {
+  // ===== 操作：本地文件拖入素材库（探测真实媒体时长；歌词读取文本） =====
+  const handleImportFiles = useCallback(async (files: File[]) => {
     if (!files || files.length === 0) return
-    const next = files.map(assetFromFile)
+    const next = await Promise.all(files.map(async (file) => {
+      const asset = assetFromFile(file)
+      const dur = await probeMediaDuration(file)
+      if (dur > 0) asset.durationSec = dur
+      if (asset.kind === 'lyrics') {
+        try {
+          asset.textContent = await file.text()
+        } catch {
+          asset.textContent = ''
+        }
+      }
+      return asset
+    }))
     setAssets((prev) => [...next, ...prev])
   }, [])
 

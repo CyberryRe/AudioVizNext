@@ -86,6 +86,8 @@ export interface EffectTemplate {
   transform?: Transform
   /** 「单次播放」类 clip：时长受关联源素材完整时长上限约束（拖尾拉满即停）。 */
   clampToSource?: boolean
+  /** 歌词类 clip：关联歌词素材 + 歌词样式编辑（滚动歌词等）。 */
+  isLyrics?: boolean
 }
 
 /**
@@ -134,6 +136,11 @@ export function createEffectCategories(): EffectCategory[] {
       name: '歌词',
       icon: '✎',
       items: [
+        {
+          id: 'tpl-lyrics-scroll', name: '滚动歌词', kind: 'text', clipType: 'text', durationFrames: 30 * 8, color: '#8a5a2a',
+          isLyrics: true,
+          desc: '关联 LRC 歌词，随播放滚动高亮当前句'
+        },
         { id: 'tpl-lyrics-karaoke', name: '卡拉OK歌词', kind: 'text', clipType: 'text', durationFrames: 30 * 6, color: '#8a5a2a', desc: 'LRC 歌词逐行高亮' }
       ]
     },
@@ -163,6 +170,8 @@ export function clipFromTemplate(tpl: EffectTemplate, trackId: string): ReturnTy
     opacity: 1,
     // 「单次播放」类：标记时长受源素材上限约束
     clampToSource: tpl.clampToSource,
-    maxDurationFrames: tpl.clampToSource ? tpl.durationFrames : undefined
+    maxDurationFrames: tpl.clampToSource ? tpl.durationFrames : undefined,
+    // 歌词类：标记，效果控件显示歌词样式编辑
+    isLyrics: tpl.isLyrics || undefined
   })
 }

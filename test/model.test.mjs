@@ -10,7 +10,9 @@ import {
   sortClips,
   resolveTimeline,
   resizeClip,
-  bindAssetToClip
+  bindAssetToClip,
+  parseLrc,
+  lrcLineAt
 } from '../src/renderer/src/model/timeline.ts'
 
 let pass = 0
@@ -167,6 +169,59 @@ t('clampToSource 绑定后源更短则收紧', () => {
   // 1 秒 × 30 = 30 帧 < 90 → 收紧为 30
   eq(next.durationFrames, 30, '时长收紧到源 30')
   eq(next.maxDurationFrames, 30, 'maxDurationFrames = 30')
+})
+t('clampToSource 素材时长未知则放开上限(无限制兜底)', () => {
+  // durationSec 缺失(如导入未探针) → assetFrames 未知 → maxDurationFrames 置 undefined，可手动调长
+  const asset = { id: 'a1', kind: 'audio', name: 'unk.mp3', src: 'x.mp3', byteSize: 1, addedAt: 0 }
+  const clip = createClip({ id: 'c1', type: 'audio', clampToSource: true, durationFrames: 30, maxDurationFrames: 30 })
+  const next = bindAssetToClip(clip, asset)
+  eq(next.maxDurationFrames, undefined, '未知时长 → 无上限')
+  const resized = resizeClip([next], 'c1', 500)
+  eq(resized[0].durationFrames, 500, '可手动拉长到 500')
+})
+
+console.log('== parseLrc 滚动歌词解析 ==')
+t('标准 [mm:ss.xx] 解析', () => {
+  const lines = parseLrc('[00:01.50]Hello\n[00:03.00]World\n')
+  eq(lines.length, 2, '两行歌词')
+  eq(lines[0].time, 1.5, '第一条时间 1.5s')
+  eq(lines[0].text, 'Hello', '第一条文本')
+  eq(lines[1].time, 3, '第二条时间 3s')
+})
+t('[mm:ss] 无小数毫秒也支持', () => {
+  const lines = parseLrc('[01:05]中间\n')
+  eq(lines.length, 1, '一行')
+  eq(lines[0].time, 65, '1分5秒 = 65s')
+})
+t('多时间标签展开为多行', () => {
+  const lines = parseLrc('[00:01.00][00:05.00]重复\n')
+  eq(lines.length, 2, '同一句在 1s 与 5s 各一条')
+  eq(lines[0].time, 1, '1s')
+  eq(lines[1].time, 5, '5s')
+})
+t('无标签纯文本行归为第0秒', () => {
+  const lines = parseLrc('开场白\n[00:02.00]正片\n')
+  eq(lines[0].time, 0, '无标签行第0秒')
+  eq(lines[0].text, '开场白', '无标签文本')
+  eq(lines[1].time, 2, '有标签行正常')
+})
+t('空行与空白被跳过', () => {
+  const lines = parseLrc('\n  \n[00:01.00]only\n')
+  eq(lines.length, 1, '仅一条有效歌词')
+  eq(lines[0].text, 'only', '跳过空行')
+})
+t('undefined 输入返回空数组', () => {
+  eq(parseLrc(undefined).length, 0, 'undefined → []')
+  eq(parseLrc('').length, 0, '空串 → []')
+})
+
+console.log('== lrcLineAt 取当前句 ==')
+t('取最后一条 time<=sec 的行', () => {
+  const lines = parseLrc('[00:01.00]第一句\n[00:03.00]第二句\n[00:05.00]第三句\n')
+  eq(lrcLineAt(lines, 0), '', '0s 尚无歌词')
+  eq(lrcLineAt(lines, 2), '第一句', '2s 显示第一句')
+  eq(lrcLineAt(lines, 3.5), '第二句', '3.5s 显示第二句')
+  eq(lrcLineAt(lines, 99), '第三句', '末尾之后停在最后一句')
 })
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

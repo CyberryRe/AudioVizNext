@@ -144,6 +144,8 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
   const isVideoLoop = !!selectedClip && selectedClip.type === 'video'
   // 是否为「单次播放」音频 clip（仅可编辑关联的音乐，时长上限为歌曲完整时长）
   const isSinglePlay = !!selectedClip && selectedClip.type === 'audio' && !!selectedClip.clampToSource
+  // 是否为歌词类 clip（滚动歌词等）
+  const isLyrics = !!selectedClip && selectedClip.type === 'text' && !!selectedClip.isLyrics
   const t = selectedClip?.transform
   // XY 关联（缩放联动）
   const [linkXY, setLinkXY] = useState(false)
@@ -153,6 +155,20 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
     const next = { ...(t ?? { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }), ...patch }
     onUpdateClipParams(selectedClipId, { transform: next })
   }
+
+  // 歌词样式更新
+  const setLyrics = (patch: Partial<NonNullable<Clip['lyrics']>>): void => {
+    if (!selectedClipId) return
+    const cur = selectedClip?.lyrics ?? {}
+    onUpdateClipParams(selectedClipId, { lyrics: { ...cur, ...patch } })
+  }
+
+  const lyricStyle = selectedClip?.lyrics ?? {}
+  const lyricAligns = [
+    { v: 'left', label: '左对齐' },
+    { v: 'center', label: '居中' },
+    { v: 'right', label: '右对齐' }
+  ] as const
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -209,6 +225,93 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
             <div style={{ fontSize: 11, color: '#888' }}>
               单次播放音频：拖拽 Clip 尾部调整时长，最多到关联歌曲的完整时长为止。
             </div>
+          </div>
+        ) : isLyrics ? (
+          <div>
+            {/* 1. 关联素材（LRC 歌词） */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>关联素材</div>
+            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => onBindAssetToClip(selectedClipId, id)} />
+            <div style={{ fontSize: 11, color: '#888', margin: '6px 0 16px' }}>从素材库拖入 LRC 歌词文本，随播放滚动高亮当前句。</div>
+
+            {/* 2. 字体 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>字体</div>
+            <select
+              value={lyricStyle.fontFamily ?? 'sans-serif'}
+              onChange={(e) => setLyrics({ fontFamily: e.target.value })}
+              style={{ width: '100%', background: '#1d1d1d', border: '1px solid #333', color: '#eee', padding: '6px 8px', fontSize: 12, borderRadius: 3, marginBottom: 14 }}
+            >
+              {['sans-serif', 'serif', 'monospace', 'KaiTi', 'Microsoft YaHei', 'SimHei'].map((f) => (
+                <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
+              ))}
+            </select>
+
+            {/* 3. 对齐 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>对齐</div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+              {lyricAligns.map((a) => (
+                <span
+                  key={a.v}
+                  onClick={() => setLyrics({ align: a.v })}
+                  style={{
+                    flex: 1,
+                    textAlign: 'center',
+                    padding: '6px 0',
+                    fontSize: 12,
+                    borderRadius: 3,
+                    cursor: 'pointer',
+                    background: (lyricStyle.align ?? 'center') === a.v ? '#1a5a9a' : '#333',
+                    color: (lyricStyle.align ?? 'center') === a.v ? '#fff' : '#ccc',
+                    border: '1px solid #444'
+                  }}
+                >
+                  {a.label}
+                </span>
+              ))}
+            </div>
+
+            {/* 4. 字号 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>字号</div>
+            <NumberSlider label="字号" value={lyricStyle.fontSize ?? 48} min={16} max={160} step={1} onChange={(v) => setLyrics({ fontSize: v })} />
+
+            {/* 5. 缩放大小 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>缩放大小</div>
+            <NumberSlider label="缩放" value={lyricStyle.scale ?? 1} min={0.2} max={4} step={0.05} onChange={(v) => setLyrics({ scale: v })} />
+
+            {/* 6. 字颜色 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>字颜色</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+              <input
+                type="color"
+                value={lyricStyle.color ?? '#ffffff'}
+                onChange={(e) => setLyrics({ color: e.target.value })}
+                style={{ width: 36, height: 28, padding: 0, border: '1px solid #444', background: 'transparent', cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: 11, color: '#999' }}>{lyricStyle.color ?? '#ffffff'}</span>
+            </div>
+
+            {/* 7. 辉光开关 + 颜色 */}
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>辉光</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <input
+                type="checkbox"
+                id="lyric-glow"
+                checked={lyricStyle.glowEnabled ?? true}
+                onChange={(e) => setLyrics({ glowEnabled: e.target.checked })}
+                style={{ accentColor: '#19a8ff' }}
+              />
+              <label htmlFor="lyric-glow" style={{ fontSize: 12, color: '#bbb' }}>启用辉光</label>
+            </div>
+            {(lyricStyle.glowEnabled ?? true) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="color"
+                  value={lyricStyle.glowColor ?? '#00e5ff'}
+                  onChange={(e) => setLyrics({ glowColor: e.target.value })}
+                  style={{ width: 36, height: 28, padding: 0, border: '1px solid #444', background: 'transparent', cursor: 'pointer' }}
+                />
+                <span style={{ fontSize: 11, color: '#999' }}>辉光颜色</span>
+              </div>
+            )}
           </div>
         ) : (
           <div style={{ textAlign: 'center', color: 'var(--text-secondary)', paddingTop: 40 }}>
