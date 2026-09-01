@@ -199,6 +199,8 @@ export class PixiRenderer {
       this.videoEls.set(src, el)
     }
     if (el.readyState === 0) el.load()
+    // 必须等元数据就绪（有真实尺寸）才返回纹理，否则无效/空纹理在 WebGL 拷贝时会 GL_INVALID_VALUE 越界
+    if (el.readyState < 1 || !el.videoWidth || !el.videoHeight) return null
     const tex = Texture.from(el)
     return tex
   }
