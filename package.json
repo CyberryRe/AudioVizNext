@@ -10,7 +10,9 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:model": "node --experimental-strip-types test/model.test.mjs",
+    "test": "npm run test:model"
   },
   "devDependencies": {
     "electron": "^43.4.0",

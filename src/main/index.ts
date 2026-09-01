@@ -27,6 +27,13 @@ function createWindow(): void {
     mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
       console.log(`SMOKE_FAIL: ${code} ${desc}`)
     })
+    // 捕获渲染进程 console（含 React 错误）
+    mainWindow.webContents.on('console-message', (_e, level, message) => {
+      if (level >= 3) console.log(`SMOKE_RENDER_ERROR: ${message}`)
+    })
+    mainWindow.webContents.on('render-process-gone', (_e, details) => {
+      console.log(`SMOKE_RENDER_GONE: ${details.reason}`)
+    })
   }
 
   // 外部链接交给系统浏览器打开，不在应用内导航

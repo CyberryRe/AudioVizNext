@@ -1,0 +1,107 @@
+/* AudioVizNext — 主布局（Pr 三列两行网格） */
+
+.app {
+  width: 100vw;
+  height: 100vh;
+  min-width: 1100px;
+  min-height: 650px;
+  background: var(--bg-app);
+  display: grid;
+  grid-template-rows: 31px 44px 1fr;
+  overflow: hidden;
+}
+
+.main {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 26% 1fr 20%;
+  grid-template-rows: 52% 48%;
+  background: var(--bg-app);
+}
+
+.panel {
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border-dark);
+  border-bottom: 1px solid var(--border-dark);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.left-top { grid-column: 1; grid-row: 1; }
+.left-bottom { grid-column: 1; grid-row: 2; }
+.center-top { grid-column: 2; grid-row: 1; }
+.center-bottom { grid-column: 2; grid-row: 2; }
+.right-top { grid-column: 3; grid-row: 1; border-right: 0; }
+.right-bottom { grid-column: 3; grid-row: 2; border-right: 0; }
+
+.panel-head {
+  height: 29px;
+  flex: none;
+  background: var(--bg-panel-head);
+  border-bottom: 1px solid var(--border-dark);
+  display: flex;
+  align-items: center;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.panel-head .dots {
+  margin-left: auto;
+  letter-spacing: 2px;
+  color: var(--text-faint);
+}
+
+.tabline {
+  height: 34px;
+  flex: none;
+  background: var(--bg-tabline);
+  border-bottom: 1px solid var(--border-dark);
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  gap: 17px;
+}
+
+.tabline .tab {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.tabline .tab.active {
+  color: #fff;
+  border-bottom: 2px solid #ddd;
+}
+
+.search {
+  height: 28px;
+  border: 1px solid var(--border-dark);
+  background: var(--bg-input);
+  border-radius: 3px;
+  margin: 10px 10px 7px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  color: var(--text-muted);
+}
+
+.search input {
+  border: 0;
+  outline: none;
+  background: transparent;
+  width: 100%;
+  font-size: 12px;
+}
+
+.search-icon {
+  font-size: 17px;
+  margin-right: 6px;
+}

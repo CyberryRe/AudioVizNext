@@ -1,13 +1,58 @@
+/* AudioVizNext — 全局样式（Pr 风格暗色主题） */
+
 * {
   box-sizing: border-box;
 }
 
+:root {
+  /* 背景层级 */
+  --bg-app: #181818;
+  --bg-panel: #1d1d1d;
+  --bg-panel-head: #1b1b1b;
+  --bg-tabline: #202020;
+  --bg-input: #121212;
+  --bg-timeline: #1c1c1c;
+  --bg-track-controls: #1b1b1b;
+
+  /* 边框 */
+  --border-dark: #090909;
+  --border-row: #292929;
+
+  /* 文字 */
+  --text-primary: #e0e0e0;
+  --text-secondary: #bbb;
+  --text-muted: #777;
+  --text-faint: #555;
+
+  /* 强调 */
+  --accent: #1988ff;
+  --accent-playhead: #17a4ff;
+  --track-video: #0b5eaa;
+  --track-audio: #2a7a3a;
+  --track-text: #8a5a2a;
+}
+
+html,
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-  -webkit-font-smoothing: antialiased;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: 'Segoe UI', 'Microsoft YaHei', Arial, sans-serif;
+  font-size: 13px;
 }
 
 #root {
   height: 100vh;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
 }
