@@ -322,7 +322,7 @@ export function defaultTransform(): Transform {
 /**
  * 给 clip 绑定素材：更新 src/assetId/name。
  * 若 asset.kind 与 clip.type 兼容（video→video/image，image→image，audio→audio），
- * 并对「空模板位」clip（src 以 avn://template/ 开头）同步时长到素材时长。
+ * 并对「空模板位」clip（尚未绑定素材，即 !assetId）同步时长到素材时长。
  * 返回新 clip（或 null 表示不兼容 / clip 不存在）。
  */
 export function bindAssetToClip(
@@ -341,8 +341,8 @@ export function bindAssetToClip(
   const src = asset.src
   const assetFrames = asset.durationSec ? Math.max(1, Math.round(asset.durationSec * 30)) : undefined
 
-  // 模板位 clip（尚未绑定真实素材）→ 时长随素材、并落素材名
-  const isTemplate = clip.src?.startsWith('avn://template/')
+  // 未绑定素材的模板位 clip → 时长随素材、并落素材名
+  const isTemplate = !clip.assetId
   const next: Clip = {
     ...clip,
     src,

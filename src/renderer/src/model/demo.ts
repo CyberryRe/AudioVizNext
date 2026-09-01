@@ -141,7 +141,7 @@ export function createEffectCategories(): EffectCategory[] {
   ]
 }
 
-/** 由模板生成一个 clip（落到指定轨道；空素材位）。 */
+/** 由模板生成一个 clip（落到指定轨道；空素材位，src 为空直到关联素材）。 */
 export function clipFromTemplate(tpl: EffectTemplate, trackId: string): ReturnType<typeof createClip> {
   return createClip({
     trackId,
@@ -149,7 +149,8 @@ export function clipFromTemplate(tpl: EffectTemplate, trackId: string): ReturnTy
     name: tpl.name,
     durationFrames: tpl.durationFrames,
     sourceDurationFrames: tpl.durationFrames,
-    src: tpl.clipType === 'text' ? undefined : `avn://template/${tpl.id}`,
+    // 空素材位：不设 src（避免 avn:// 占位触发 CSP / 加载报错），关联素材后才填充
+    src: undefined,
     content: tpl.clipType === 'text' ? (tpl.desc ?? tpl.name) : undefined,
     transform: tpl.transform,
     opacity: 1
