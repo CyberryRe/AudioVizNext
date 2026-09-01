@@ -21,15 +21,60 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
   const scene = resolveTimeline(frame, project)
   const fps = project.fps
   const { width, height } = project.stage
-  const stageRef = useRef<HTMLDivElement>(null)
+  const previewRef = useRef<HTMLDivElement>(null)
   const [fit, setFit] = useState('适合')
   const [fitOpen, setFitOpen] = useState(false)
   const [totalFrames, setTotalFrames] = useState(30 * 12)
+
+  // 预览区可用尺寸（自适应缩放用）
+  const [area, setArea] = useState({ w: 800, h: 450 })
 
   // 收集预览视频元素，随播放状态播放/暂停
   const videoRefs = useRef<(HTMLVideoElement | null)[]>([])
   // 收集音频 clip 的 <audio> 元素（「单次播放」等音频轨发声用）
   const audioRefs = useRef<(HTMLAudioElement | null)[]>([])
+
+  // 监听预览区尺寸，自适应缩放画幅(Mask)，改比例/窗口大小都会跟随
+  useEffect(() => {
+    const el = previewRef.current
+    if (!el) return
+    const update = (): void => {
+      const r = el.getBoundingClientRect()
+      setArea({ w: r.width, h: r.height })
+    }
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // 计算画幅(Mask)在预览区内自适应 fit 后的像素尺寸（保持序列比例）
+  const aspect = width / height
+  // 「适合」= 缩放铺进预览区；否则按真实分辨率比例缩放（100%/50%/25%/放大）
+  let maskW = width
+  let maskH = height
+  if (fit === '适合') {
+    maskW = area.w * 0.92
+    maskH = maskW / aspect
+    if (maskH > area.h * 0.86) {
+      maskH = area.h * 0.86
+      maskW = maskH * aspect
+    }
+  } else if (fit === '100%') {
+    // 1:1 真实像素
+    maskW = width
+    maskH = height
+  } else if (fit === '50%') {
+    maskW = width / 2
+    maskH = height / 2
+  } else if (fit === '25%') {
+    maskW = width / 4
+    maskH = height / 4
+  } else {
+    // 放大：1.5×
+    maskW = width * 1.5
+    maskH = height * 1.5
+  }
 
   // 估算工程总帧（预览进度条用）
   useEffect(() => {
@@ -117,40 +162,80 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
         <span style={{ marginLeft: 'auto', color: '#888', cursor: 'pointer' }}>☰</span>
       </div>
 
-      {/* 预览画布 */}
+      {/* 预览画布：视频内容完整显示，画幅(Mask)作为叠在上层的输出窗口 */}
       <div
+        ref={previewRef}
         style={{
           flex: 1,
           minHeight: 0,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '0 20px 10px',
-          // 画幅外深色底纹，衬托中间遮罩(Mask)亮边框
-          background: 'radial-gradient(circle at 50% 45%, #262626 0%, #161616 70%)',
+          position: 'relative',
+          // 画幅外深色底纹，衬托中间遮罩
+          background: 'radial-gradient(circle at 50% 45%, #262626 0%, #141414 70%)',
           overflow: 'hidden'
         }}
       >
+        {/* 媒体内容层：完整显示原素材（objectFit:contain，绝不按遮罩比例裁剪），中心对齐画幅；可被变换移动 */}
+        {mediaLayers.map((l, i) => {
+          const tr = l.transform
+          const scaleX = tr?.scaleX ?? 1
+          const scaleY = tr?.scaleY ?? 1
+          // 位置：相对画幅(遮罩)的比例 -0.5..0.5，换算为像素偏移
+          const tx = tr?.x ?? 0
+          const ty = tr?.y ?? 0
+          const dx = tx * maskW
+          const dy = ty * maskH
+          // 媒体框至少铺满遮罩与预览区，保证能露出遮罩外的素材（不裁剪）
+          const mediaBoxW = Math.max(maskW, area.w)
+          const mediaBoxH = Math.max(maskH, area.h)
+          return (
+            <div
+              key={i}
+              style={{
+                position: 'absolute',
+                left: '50%',
+                top: '50%',
+                width: mediaBoxW,
+                height: mediaBoxH,
+                transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(${scaleX}, ${scaleY})`,
+                transformOrigin: 'center',
+                opacity: l.opacity,
+                pointerEvents: 'none'
+              }}
+            >
+              {l.src && (
+                <video
+                  ref={(el) => { videoRefs.current[i] = el }}
+                  src={l.src}
+                  muted
+                  loop
+                  playsInline
+                  preload="metadata"
+                  style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#000' }}
+                />
+              )}
+            </div>
+          )
+        })}
+
+        {/* 画幅(Mask)窗口：边框 + 外部压暗，标明"最终渲染取哪一部分" */}
         <div
-          ref={stageRef}
           style={{
-            width: 'min(88%, 900px)',
-            aspectRatio: `${width}/${height}`,
-            background: '#000',
-            // 遮罩(Mask)边界指示：亮边框 + 外侧一圈暗角，让用户看清"渲染会取哪部分"
-            boxShadow: '0 0 0 1px rgba(255,255,255,.28), 0 0 24px rgba(0,0,0,.9)',
-            outline: '1px solid rgba(255,255,255,.08)',
-            position: 'relative',
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: maskW,
+            height: maskH,
+            // 外部压暗（9999px 大阴影铺满视口外侧），内部即输出区域
+            boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)',
+            border: '1px solid rgba(255,255,255,0.55)',
+            borderRadius: 1,
             overflow: 'hidden',
-            borderRadius: 2
+            background: 'rgba(0,0,0,0.02)'
           }}
         >
-          {mediaLayers.length === 0 && textLayers.length === 0 && (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#333' }}>
-              无素材
-            </div>
-          )}
-          {textLayers.map((l) => (
+          {/* 文字层：属于输出内容，绘制在画幅内 */}
+          {textLayers.length > 0 && textLayers.map((l) => (
             <div
               key={l.clip.id}
               style={{
@@ -170,49 +255,24 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
               {l.clip.content}
             </div>
           ))}
-          {mediaLayers.map((l, i) => {
-            const tr = l.transform
-            const scaleX = tr?.scaleX ?? 1
-            const scaleY = tr?.scaleY ?? 1
-            // 位置：相对画幅(遮罩)的比例，范围 -0.5..0.5（内容中心可在画幅内移动，画幅本身不动）
-            const tx = tr?.x ?? 0
-            const ty = tr?.y ?? 0
-            return (
-              <div
-                key={i}
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  transform: `translate(${tx * 100}%, ${ty * 100}%) scale(${scaleX}, ${scaleY})`,
-                  transformOrigin: 'center',
-                  opacity: l.opacity,
-                  pointerEvents: 'none'
-                }}
-              >
-                <video
-                  ref={(el) => { videoRefs.current[i] = el }}
-                  src={l.src}
-                  muted
-                  loop
-                  playsInline
-                  preload="metadata"
-                  style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                />
-              </div>
-            )
-          })}
-          {/* 音频 clip（不可见，仅发声） */}
-          {audioLayers.map((l, i) => (
-            <audio
-              key={i}
-              ref={(el) => { audioRefs.current[i] = el }}
-              src={l.src}
-              preload="metadata"
-              data-source-frame={l.sourceFrame}
-              style={{ display: 'none' }}
-            />
-          ))}
+          {mediaLayers.length === 0 && textLayers.length === 0 && (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#444', fontSize: 13 }}>
+              无素材 · 黑色窗口即输出画幅(Mask)
+            </div>
+          )}
         </div>
+
+        {/* 音频 clip（不可见，仅发声） */}
+        {audioLayers.map((l, i) => (
+          <audio
+            key={i}
+            ref={(el) => { audioRefs.current[i] = el }}
+            src={l.src}
+            preload="metadata"
+            data-source-frame={l.sourceFrame}
+            style={{ display: 'none' }}
+          />
+        ))}
       </div>
 
       {/* 播放控制 */}
