@@ -13,7 +13,7 @@ import {
   createEffectCategories,
   type EffectTemplate
 } from './model/demo'
-import { addClipToTrack, assetFromFile } from './model/timeline'
+import { addClipToTrack, moveClip, resizeClip, assetFromFile } from './model/timeline'
 import TitleBar from './components/TitleBar'
 import MenuBar from './components/MenuBar'
 import EffectControls from './components/EffectControls'
@@ -124,6 +124,33 @@ export default function App(): React.JSX.Element {
     }))
   }, [])
 
+  // ===== 操作：同轨移动 clip =====
+  const handleMoveClip = useCallback((clipId: string, newStart: number) => {
+    setProject((prev) => {
+      // 找到 clip 所在轨
+      let trackId = ''
+      for (const [tid, clips] of Object.entries(prev.clips)) {
+        if (clips.some((c) => c.id === clipId)) { trackId = tid; break }
+      }
+      if (!trackId) return prev
+      const next = moveClip(prev.clips[trackId] ?? [], clipId, newStart)
+      return { ...prev, clips: { ...prev.clips, [trackId]: next }, version: prev.version + 1 }
+    })
+  }, [])
+
+  // ===== 操作：同轨调整 clip 时长 =====
+  const handleResizeClip = useCallback((clipId: string, newDuration: number) => {
+    setProject((prev) => {
+      let trackId = ''
+      for (const [tid, clips] of Object.entries(prev.clips)) {
+        if (clips.some((c) => c.id === clipId)) { trackId = tid; break }
+      }
+      if (!trackId) return prev
+      const next = resizeClip(prev.clips[trackId] ?? [], clipId, newDuration)
+      return { ...prev, clips: { ...prev.clips, [trackId]: next }, version: prev.version + 1 }
+    })
+  }, [])
+
   // 供子组件从 assets 按 id 取素材
   const getAsset = useCallback(
     (id: string) => assets.find((a) => a.id === id),
@@ -185,6 +212,8 @@ export default function App(): React.JSX.Element {
             onAddTemplate={handleAddTemplate}
             onAddAssetClip={handleAddAssetClip}
             onToggleTrack={handleToggleTrack}
+            onMoveClip={handleMoveClip}
+            onResizeClip={handleResizeClip}
             getAsset={getAsset}
           />
         </section>

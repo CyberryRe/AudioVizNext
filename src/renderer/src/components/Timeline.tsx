@@ -15,6 +15,8 @@ interface TimelineProps {
   onAddTemplate: (tpl: EffectTemplate, dropFrame: number, targetTrackId?: string) => void
   onAddAssetClip: (asset: MediaAsset, dropFrame: number, targetTrackId?: string) => void
   onToggleTrack: (trackId: string, prop: 'disabled' | 'muted' | 'solo' | 'locked') => void
+  onMoveClip: (clipId: string, newStart: number) => void
+  onResizeClip: (clipId: string, newDuration: number) => void
   getAsset: (id: string) => MediaAsset | undefined
 }
 
@@ -77,6 +79,8 @@ export default function Timeline({
   onAddTemplate,
   onAddAssetClip,
   onToggleTrack,
+  onMoveClip,
+  onResizeClip,
   getAsset
 }: TimelineProps): React.JSX.Element {
   const fps = project.fps
@@ -284,6 +288,8 @@ export default function Timeline({
                     pxPerFrame={PX_PER_FRAME}
                     selected={clip.id === selectedClipId}
                     onSelect={() => onSelectClip(clip.id === selectedClipId ? null : clip.id)}
+                    onMove={(newStart) => onMoveClip(clip.id, newStart)}
+                    onResize={(newDuration) => onResizeClip(clip.id, newDuration)}
                   />
                 ))}
               </div>
@@ -338,26 +344,69 @@ export default function Timeline({
   )
 }
 
-/** 单个 clip 块 */
+/** 单个 clip 块 —— 支持拖动改变位置 + 拖动右缘调整时长 */
 function ClipBlock({
   clip,
   track,
   pxPerFrame,
   selected,
-  onSelect
+  onSelect,
+  onMove,
+  onResize
 }: {
   clip: Clip
   track: Track
   pxPerFrame: number
   selected: boolean
   onSelect: () => void
+  onMove: (newStart: number) => void
+  onResize: (newDuration: number) => void
 }): React.JSX.Element {
   const left = clip.startFrame * pxPerFrame
   const width = clip.durationFrames * pxPerFrame
 
+  /** 拖动主体：移动 clip */
+  const startMove = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    const startClientX = e.clientX
+    const startFrame = clip.startFrame
+    const move = (ev: MouseEvent): void => {
+      const deltaFrame = Math.round((ev.clientX - startClientX) / pxPerFrame)
+      onMove(startFrame + deltaFrame)
+    }
+    const up = (): void => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      document.body.style.cursor = ''
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+    document.body.style.cursor = 'grabbing'
+  }
+
+  /** 拖动右缘：调整时长 */
+  const startResize = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    const startClientX = e.clientX
+    const startDur = clip.durationFrames
+    const move = (ev: MouseEvent): void => {
+      const deltaFrame = Math.round((ev.clientX - startClientX) / pxPerFrame)
+      onResize(startDur + deltaFrame)
+    }
+    const up = (): void => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      document.body.style.cursor = ''
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+    document.body.style.cursor = 'ew-resize'
+  }
+
   return (
     <div
       onClick={(e) => { e.stopPropagation(); onSelect() }}
+      onMouseDown={startMove}
       style={{
         position: 'absolute',
         left,
@@ -375,12 +424,33 @@ function ClipBlock({
         fontSize: 10,
         whiteSpace: 'nowrap',
         overflow: 'hidden',
-        cursor: 'pointer',
-        userSelect: 'none'
+        cursor: 'grab',
+        userSelect: 'none',
+        touchAction: 'none'
       }}
-      title={clip.name}
+      title={`${clip.name}（拖动移动，拖右缘调整时长）`}
     >
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{clip.name}</span>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none' }}>{clip.name}</span>
+      {/* 右缘调整手柄 */}
+      <div
+        onMouseDown={startResize}
+        style={{
+          position: 'absolute',
+          right: 0,
+          top: 0,
+          bottom: 0,
+          width: 10,
+          cursor: 'ew-resize',
+          background: 'rgba(255,255,255,0.15)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 8,
+          color: 'rgba(255,255,255,0.6)'
+        }}
+      >
+        ▏
+      </div>
     </div>
   )
 }

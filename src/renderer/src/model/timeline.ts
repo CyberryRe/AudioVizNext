@@ -226,6 +226,43 @@ export function addClipToTrack(
   }
 }
 
+/**
+ * 同轨移动 clip：把 startFrame 改为 newStart，若与其他 clip 重叠则推到对方末尾。
+ * 返回新的 clips 数组（不可变）。
+ */
+export function moveClip(clips: Clip[], clipId: string, newStart: number): Clip[] {
+  const others = clips.filter((c) => c.id !== clipId)
+  const target = clips.find((c) => c.id === clipId)
+  if (!target) return clips
+
+  let start = Math.max(0, newStart)
+  const dur = target.durationFrames
+  // 避免与其他 clip 重叠：若 [start, start+dur) 与任一 other 相交，推到该 other 的末尾
+  for (const o of others) {
+    const oEnd = o.startFrame + o.durationFrames
+    if (start < oEnd && start + dur > o.startFrame) {
+      start = oEnd
+    }
+  }
+  return sortClips([...others, { ...target, startFrame: start }])
+}
+
+/** 同轨调整 clip 时长：改变 durationFrames（至少 1 帧），右侧相邻 clip 不重叠。 */
+export function resizeClip(clips: Clip[], clipId: string, newDuration: number): Clip[] {
+  const target = clips.find((c) => c.id === clipId)
+  if (!target) return clips
+
+  // 最小 1 帧，最大不超过右侧相邻 clip 的起点
+  let dur = Math.max(1, Math.round(newDuration))
+  const rightNeighbor = clips
+    .filter((c) => c.id !== clipId && c.startFrame >= target.startFrame)
+    .sort((a, b) => a.startFrame - b.startFrame)[0]
+  if (rightNeighbor) {
+    dur = Math.min(dur, rightNeighbor.startFrame - target.startFrame)
+  }
+  return clips.map((c) => (c.id === clipId ? { ...c, durationFrames: dur } : c))
+}
+
 /** 依据文件扩展名推断素材类型。 */
 export function kindFromFileName(name: string): MediaAsset['kind'] {
   const ext = name.split('.').pop()?.toLowerCase() ?? ''

@@ -26,6 +26,9 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
   const [fitOpen, setFitOpen] = useState(false)
   const [totalFrames, setTotalFrames] = useState(30 * 12)
 
+  // 收集预览视频元素，随播放状态播放/暂停
+  const videoRefs = useRef<(HTMLVideoElement | null)[]>([])
+
   // 估算工程总帧（预览进度条用）
   useEffect(() => {
     let max = 0
@@ -51,6 +54,15 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
     ...scene.images.map((i) => ({ z: i.zIndex, src: i.src, opacity: i.opacity }))
   ].sort((a, b) => a.z - b.z)
   textLayers.sort((a, b) => a.z - b.z)
+
+  // 播放状态 → 控制预览视频播放/暂停（未点播放时不自动播放）
+  useEffect(() => {
+    const vids = videoRefs.current.filter((v): v is HTMLVideoElement => !!v)
+    for (const v of vids) {
+      if (isPlaying) v.play().catch(() => {})
+      else v.pause()
+    }
+  }, [isPlaying, mediaLayers.length])
 
   // 进度条拖动 seek
   const progressRef = useRef<HTMLDivElement>(null)
@@ -134,10 +146,12 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
           {mediaLayers.map((l, i) => (
             <video
               key={i}
+              ref={(el) => { videoRefs.current[i] = el }}
               src={l.src}
-              autoPlay
               muted
               loop
+              playsInline
+              preload="metadata"
               style={{
                 position: 'absolute',
                 inset: 0,
