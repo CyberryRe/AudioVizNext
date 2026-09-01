@@ -206,40 +206,39 @@ export default function Timeline({
         >
           <Ruler total={total} fps={fps} pxPerFrame={pxPerFrame} onSeek={onSeek} frameFromEvent={frameFromEvent} />
 
-          {!videoCollapsed && (
-            <ZoneRows
-              zone="video"
-              tracks={videoTracks}
-              clips={project.clips}
-              pxPerFrame={pxPerFrame}
-              selectedClipId={selectedClipId}
-              onSelectClip={onSelectClip}
-              onMoveClip={onMoveClip}
-              onResizeClip={onResizeClip}
-              onMoveClipAcrossTracks={onMoveClipAcrossTracks}
-              getAsset={getAsset}
-              onSeek={onSeek}
-              frameFromEvent={frameFromEvent}
-              topOffset={RULER_HEIGHT}
-            />
-          )}
-          {!audioCollapsed && (
-            <ZoneRows
-              zone="audio"
-              tracks={audioTracks}
-              clips={project.clips}
-              pxPerFrame={pxPerFrame}
-              selectedClipId={selectedClipId}
-              onSelectClip={onSelectClip}
-              onMoveClip={onMoveClip}
-              onResizeClip={onResizeClip}
-              onMoveClipAcrossTracks={onMoveClipAcrossTracks}
-              getAsset={getAsset}
-              onSeek={onSeek}
-              frameFromEvent={frameFromEvent}
-              topOffset={RULER_HEIGHT + (videoCollapsed ? ZONE_HEADER_HEIGHT : ZONE_HEADER_HEIGHT + videoTracks.length * TRACK_HEIGHT)}
-            />
-          )}
+          {/* 视频区轨道行（折叠时仍保留头部占位，与左控制列对齐） */}
+          <ZoneRows
+            zone="video"
+            tracks={videoTracks}
+            clips={project.clips}
+            pxPerFrame={pxPerFrame}
+            selectedClipId={selectedClipId}
+            onSelectClip={onSelectClip}
+            onMoveClip={onMoveClip}
+            onResizeClip={onResizeClip}
+            onMoveClipAcrossTracks={onMoveClipAcrossTracks}
+            getAsset={getAsset}
+            onSeek={onSeek}
+            frameFromEvent={frameFromEvent}
+            topOffset={RULER_HEIGHT}
+            collapsed={videoCollapsed}
+          />
+          <ZoneRows
+            zone="audio"
+            tracks={audioTracks}
+            clips={project.clips}
+            pxPerFrame={pxPerFrame}
+            selectedClipId={selectedClipId}
+            onSelectClip={onSelectClip}
+            onMoveClip={onMoveClip}
+            onResizeClip={onResizeClip}
+            onMoveClipAcrossTracks={onMoveClipAcrossTracks}
+            getAsset={getAsset}
+            onSeek={onSeek}
+            frameFromEvent={frameFromEvent}
+            topOffset={RULER_HEIGHT + ZONE_HEADER_HEIGHT + (videoCollapsed ? 0 : videoTracks.length * TRACK_HEIGHT)}
+            collapsed={audioCollapsed}
+          />
 
           <div
             onMouseDown={handlePlayheadDrag}
@@ -395,8 +394,8 @@ function TrackControlRow({ track, onToggleTrack }: {
   )
 }
 
-/** 右侧某分区轨道行。topOffset = 该区在时间区内的 Y 起点（含标尺）。 */
-function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectClip, onMoveClip, onResizeClip, onMoveClipAcrossTracks, getAsset, onSeek, frameFromEvent, topOffset }: {
+/** 右侧某分区轨道行。topOffset = 该区在时间区内的 Y 起点（含标尺）。collapsed 时只显示折叠头。 */
+function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectClip, onMoveClip, onResizeClip, onMoveClipAcrossTracks, getAsset, onSeek, frameFromEvent, topOffset, collapsed }: {
   zone: TrackZone
   tracks: Track[]
   clips: Record<string, Clip[]>
@@ -410,8 +409,9 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
   onSeek: (f: number) => void
   frameFromEvent: (clientX: number) => number
   topOffset: number
+  collapsed?: boolean
 }): React.JSX.Element {
-  const zoneHeight = ZONE_HEADER_HEIGHT + tracks.length * TRACK_HEIGHT
+  const zoneHeight = collapsed ? ZONE_HEADER_HEIGHT : ZONE_HEADER_HEIGHT + tracks.length * TRACK_HEIGHT
 
   // 跨轨拖动的目标解析：由 Y 坐标找所在轨道行（同区）。
   // 视频区拖到最顶（第一轨上方）→ 返回 '__new__'，由 App 自动新建视频轨。
@@ -439,7 +439,7 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
         <span style={{ width: 8, height: 8, borderRadius: 2, background: zone === 'video' ? 'var(--track-video)' : 'var(--track-audio)' }} />
         {zone === 'video' ? '视频轨道区（拖到上方可自动新建视频轨）' : '音频轨道区'}
       </div>
-      {tracks.map((track) => (
+      {!collapsed && tracks.map((track) => (
         <div
           key={track.id}
           data-zone={zone}
