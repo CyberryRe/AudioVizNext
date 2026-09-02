@@ -150,6 +150,9 @@ export class PixiRenderer {
         const tex = this.textureFor(l.src)
         if (tex && sp.texture !== tex) sp.texture = tex
         if (sp.texture?.valid) {
+          // 视频纹理强制刷新到当前源帧：Pixi v8 对 video 纹理，暂停/seek 后不会自动拉新帧，
+          // 必须 update() 才能把 video.currentTime 对应的帧上传到 GPU（否则拖动进度条画面不更新）。
+          if (isVideo) sp.texture.update()
           // 视频/图片适配画幅：contain（完整显示，不被遮罩裁剪），缩放补满画幅
           const sw = sp.texture.width, sh = sp.texture.height
           const scale = Math.max(project.stage.width / sw, project.stage.height / sh)
@@ -237,18 +240,18 @@ export class PixiRenderer {
       el.loop = true
       el.preload = 'auto'
       el.playsInline = true
-      el.crossOrigin = 'anonymous'
+      // 注意：不加 crossOrigin——avn-file:// 是自定义协议，CORS 模式反而会让视频加载失败
       this.videoEls.set(src, el)
       // 静音自动播放：Pixi v8 视频纹理需要视频持续有帧（play 状态）才能正确 upload，
       // 暂停/从未播放时 Texture.from 首次创建的是"未定义"的 destination texture，
       // WebGL 拷贝即报 GL_INVALID_OPERATION: destination level must be defined。
       el.play().catch(() => {})
     }
-    // 必须等有实际帧数据（HAVE_ENOUGH_DATA, readyState>=4）才返回纹理；
-    // readyState 2/3 虽标称有当前帧，但若视频 paused/从未播过，像素尚未真正解码，
-    // Texture.from 首次 upload 会因 destination texture 未定义报 GL_INVALID_OPERATION。
-    if (el.readyState < 4 || !el.videoWidth || !el.videoHeight) {
-      if (el.readyState < 4) el.play().catch(() => {})
+    // 必须有实际帧数据（HAVE_CURRENT_DATA, readyState>=2）才返回纹理；
+    // 仅元数据(readyState=1)时尺寸可读但像素未就绪。此处已 play + render 前先 seek，
+    // 故 readyState>=2 即可；再用 tex.valid/尺寸兜底二次校验防 GL_INVALID_OPERATION。
+    if (el.readyState < 2 || !el.videoWidth || !el.videoHeight) {
+      if (el.readyState < 2) el.play().catch(() => {})
       return null
     }
     let tex: Texture | null = null

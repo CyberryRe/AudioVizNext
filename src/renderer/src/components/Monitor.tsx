@@ -110,14 +110,39 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
     setTotalFrames(max || 30 * 12)
   }, [project])
 
-  // 简单播放时钟：isPlaying 时每秒前进 fps 帧（占位，后续接 PlaybackEngine）
+  // 简单播放时钟：wall-clock 绝对时间驱动（rAF + performance.now 基准现算），
+  // 绝不用 setInterval 累计帧数——定时器延迟会累积漂移，时间越久歌词/视频切句越滞后。
+  // 播放开始记录 {wall, frame} 基准；每 rAF 现算 f = base.frame + (now-base.wall)/1000*fps。
+  // 外部 seek（进度条拖动/⏮/⏭）会令 frame 突变，检测到与预测偏差过大时重置基准续播。
+  const frameRef = useRef(frame)
+  frameRef.current = frame
+  const clockBaseRef = useRef<{ wall: number; frame: number } | null>(null)
   useEffect(() => {
-    if (!isPlaying) return
-    const id = setInterval(() => {
-      onSeek(frame + 1)
-    }, 1000 / fps)
-    return () => clearInterval(id)
-  }, [isPlaying, frame, fps, onSeek])
+    if (!isPlaying) {
+      clockBaseRef.current = null
+      return
+    }
+    const now = performance.now()
+    // 预测当前帧：若与真实 frame 偏差过大（外部 seek 或拖动），重置基准到最新播放头
+    const predicted = clockBaseRef.current
+      ? clockBaseRef.current.frame + ((now - clockBaseRef.current.wall) / 1000) * fps
+      : -1
+    if (Math.abs(predicted - frameRef.current) > fps * 0.5) {
+      clockBaseRef.current = { wall: now, frame: frameRef.current }
+    } else if (!clockBaseRef.current) {
+      clockBaseRef.current = { wall: now, frame: frameRef.current }
+    }
+    let raf = 0
+    const tick = (): void => {
+      const base = clockBaseRef.current
+      if (!base) return
+      const f = Math.floor(base.frame + ((performance.now() - base.wall) / 1000) * fps)
+      onSeek(f)
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [isPlaying, fps, onSeek])
 
   // 按 zIndex 升序排序，最后渲染的在上层。收集 transform 以应用缩放/位置。
   const textLayers = scene.texts.map((t) => ({ z: t.zIndex, clip: t }))
@@ -224,7 +249,7 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
           overflow: 'hidden'
         }}
       >
-        {/* Pixi 渲染后端宿主（开启时挂 WebGL canvas，遮罩/音频仍在 DOM 叠加） */}
+        {/* Pixi 渲染后端宿主（开启时挂 WebGL canvas，渲染媒体+文字；遮罩/音频仍在 DOM 叠加） */}
         <div ref={pixiHostRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
         {pixiErr && (
           <div style={{ position: 'absolute', top: 8, left: 8, color: '#ff8080', fontSize: 11, background: 'rgba(0,0,0,.7)', padding: '4px 8px', borderRadius: 3, zIndex: 20 }}>
@@ -232,51 +257,7 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
           </div>
         )}
 
-        {!pixiOn && (<>
-        {/* 媒体内容层：完整显示原素材（objectFit:contain，绝不按遮罩比例裁剪），中心对齐画幅；可被变换移动 */}
-        {mediaLayers.map((l, i) => {
-          const tr = l.transform
-          const scaleX = tr?.scaleX ?? 1
-          const scaleY = tr?.scaleY ?? 1
-          // 位置：相对画幅(遮罩)的比例 -0.5..0.5，换算为像素偏移
-          const tx = tr?.x ?? 0
-          const ty = tr?.y ?? 0
-          const dx = tx * maskW
-          const dy = ty * maskH
-          // 媒体框至少铺满遮罩与预览区，保证能露出遮罩外的素材（不裁剪）
-          const mediaBoxW = Math.max(maskW, area.w)
-          const mediaBoxH = Math.max(maskH, area.h)
-          return (
-            <div
-              key={i}
-              style={{
-                position: 'absolute',
-                left: '50%',
-                top: '50%',
-                width: mediaBoxW,
-                height: mediaBoxH,
-                transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(${scaleX}, ${scaleY})`,
-                transformOrigin: 'center',
-                opacity: l.opacity,
-                pointerEvents: 'none'
-              }}
-            >
-              {l.src && (
-                <video
-                  ref={(el) => { videoRefs.current[i] = el }}
-                  src={l.src}
-                  muted
-                  loop
-                  playsInline
-                  preload="metadata"
-                  style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#000' }}
-                />
-              )}
-            </div>
-          )
-        })}
-
-        {/* 画幅(Mask)窗口：边框 + 外部压暗，标明"最终渲染取哪一部分" */}
+        {/* 画幅(Mask)窗口：边框 + 外部压暗，标明"最终渲染取哪一部分"。始终渲染（Pixi/DOM 模式都在） */}
         <div
           style={{
             position: 'absolute',
@@ -290,9 +271,54 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             border: '1px solid rgba(255,255,255,0.55)',
             borderRadius: 1,
             overflow: 'hidden',
-            background: 'rgba(0,0,0,0.02)'
+            background: 'rgba(0,0,0,0.02)',
+            pointerEvents: 'none'
           }}
         >
+          {!pixiOn && (<>
+          {/* 媒体内容层：完整显示原素材（objectFit:contain，绝不按遮罩比例裁剪），中心对齐画幅；可被变换移动 */}
+          {mediaLayers.map((l, i) => {
+            const tr = l.transform
+            const scaleX = tr?.scaleX ?? 1
+            const scaleY = tr?.scaleY ?? 1
+            // 位置：相对画幅(遮罩)的比例 -0.5..0.5，换算为像素偏移
+            const tx = tr?.x ?? 0
+            const ty = tr?.y ?? 0
+            const dx = tx * maskW
+            const dy = ty * maskH
+            // 媒体框至少铺满遮罩与预览区，保证能露出遮罩外的素材（不裁剪）
+            const mediaBoxW = Math.max(maskW, area.w)
+            const mediaBoxH = Math.max(maskH, area.h)
+            return (
+              <div
+                key={i}
+                style={{
+                  position: 'absolute',
+                  left: '50%',
+                  top: '50%',
+                  width: mediaBoxW,
+                  height: mediaBoxH,
+                  transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(${scaleX}, ${scaleY})`,
+                  transformOrigin: 'center',
+                  opacity: l.opacity,
+                  pointerEvents: 'none'
+                }}
+              >
+                {l.src && (
+                  <video
+                    ref={(el) => { videoRefs.current[i] = el }}
+                    src={l.src}
+                    muted
+                    loop
+                    playsInline
+                    preload="metadata"
+                    style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#000' }}
+                  />
+                )}
+              </div>
+            )
+          })}
+
           {/* 文字层：属于输出内容，绘制在画幅内（歌词 clip 按样式+当前句渲染） */}
           {textLayers.length > 0 && textLayers.map((l) => {
             const clip = clipLookup.current.get(l.clip.id)
@@ -368,8 +394,8 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
               无素材 · 黑色窗口即输出画幅(Mask)
             </div>
           )}
+          </>)}
         </div>
-        </>)}
 
         {/* 音频 clip（不可见，仅发声） */}
         {audioLayers.map((l, i) => (
