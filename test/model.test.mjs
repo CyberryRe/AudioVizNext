@@ -16,7 +16,9 @@ import {
   lrcIndexAt,
   lrcGlide,
   mixColor,
-  parseColor
+  parseColor,
+  addVideoTrack,
+  addAudioTrack
 } from '../src/renderer/src/model/timeline.ts'
 
 let pass = 0
@@ -272,6 +274,65 @@ t('mixColor 端点插值', () => {
   eq(mixColor('#ffffff', '#000000', 0), 'rgb(255,255,255)', 'k=0 → c1')
   eq(mixColor('#ffffff', '#000000', 1), 'rgb(0,0,0)', 'k=1 → c2')
   eq(mixColor('#ffffff', '#000000', 0.5), 'rgb(128,128,128)', 'k=0.5 → 中间灰')
+})
+
+console.log('== 轨道新增顺序（顶→底 = order 升序，UI 与渲染一致） ==')
+t('addVideoTrack 新视频轨插到视频区最前(order=0,数组首位)', () => {
+  const p = createProject({ fps: 30 })
+  const v2 = createTrack({ id: 'v2', name: 'V2', kind: 'video', zone: 'video', order: 0 })
+  const v1 = createTrack({ id: 'v1', name: 'V1', kind: 'video', zone: 'video', order: 1 })
+  const a1 = createTrack({ id: 'a1', name: 'A1', kind: 'audio', zone: 'audio', order: 2 })
+  p.tracks = [v2, v1, a1]
+  const { tracks, track } = addVideoTrack(p.tracks)
+  eq(track.order, 0, '新视频轨 order=0(最顶)')
+  eq(tracks[0].id, track.id, '新轨位于数组首位(UI 最上)')
+  const vids = tracks.filter((t) => t.zone === 'video')
+  eq(vids.length, 3, '3 条视频轨')
+  // 视频区数组顺序必须按 order 升序（顶→底）
+  for (let i = 1; i < vids.length; i++) truthy(vids[i - 1].order < vids[i].order, '视频区按 order 升序')
+  const sorted = [...tracks.filter((t) => t.zone === 'video')].sort((x, y) => x.order - y.order)
+  truthy(vids.every((t, i) => t.id === sorted[i].id), '视频区数组顺序 == order 升序')
+  truthy(tracks[0].zone === 'video', '首位是视频轨')
+})
+t('连续 addVideoTrack 每次都在最顶新增', () => {
+  const p = createProject({ fps: 30 })
+  const v1 = createTrack({ id: 'v1', name: 'V1', kind: 'video', zone: 'video', order: 0 })
+  const a1 = createTrack({ id: 'a1', name: 'A1', kind: 'audio', zone: 'audio', order: 1 })
+  p.tracks = [v1, a1]
+  let tracks = p.tracks
+  for (let k = 0; k < 3; k++) {
+    const r = addVideoTrack(tracks)
+    tracks = r.tracks
+    eq(r.track.order, 0, `第${k + 2}条新视频轨 order=0`)
+    eq(tracks[0].id, r.track.id, `第${k + 2}条位于数组首位`)
+    const topVideo = tracks.filter((t) => t.zone === 'video')[0]
+    eq(topVideo.id, r.track.id, '最顶视频轨 == 最新新增')
+  }
+})
+t('addAudioTrack 追加到音频轨之下(order=max+1,数组尾)', () => {
+  const p = createProject({ fps: 30 })
+  const v1 = createTrack({ id: 'v1', name: 'V1', kind: 'video', zone: 'video', order: 0 })
+  const a1 = createTrack({ id: 'a1', name: 'A1', kind: 'audio', zone: 'audio', order: 1 })
+  p.tracks = [v1, a1]
+  const { tracks, track } = addAudioTrack(p.tracks)
+  eq(track.order, 2, '新音频轨 order=max+1')
+  eq(tracks[tracks.length - 1].id, track.id, '新音频轨在数组末尾(最底)')
+  const auds = tracks.filter((t) => t.zone === 'audio')
+  truthy(auds.every((t, i) => i === 0 || auds[i - 1].order < t.order), '音频区按 order 升序')
+})
+t('zIndex：order 越小视频轨 zIndex 越高（越靠前）', () => {
+  const p = createProject({ fps: 30 })
+  const vTop = createTrack({ id: 'vt', name: 'V2', kind: 'video', order: 0 })
+  const vBot = createTrack({ id: 'vb', name: 'V1', kind: 'video', order: 1 })
+  p.tracks = [vTop, vBot]
+  const cTop = createClip({ id: 'ct', trackId: 'vt', type: 'video', startFrame: 0, durationFrames: 30, src: 'a.mp4' })
+  const cBot = createClip({ id: 'cb', trackId: 'vb', type: 'video', startFrame: 0, durationFrames: 30, src: 'b.mp4' })
+  p.clips = { vt: [cTop], vb: [cBot] }
+  const s = resolveTimeline(5, p)
+  const top = s.videos.find((v) => v.id === 'ct')
+  const bot = s.videos.find((v) => v.id === 'cb')
+  truthy(top && bot, '两个视频都在场景')
+  truthy(top.zIndex > bot.zIndex, 'order 0 轨 zIndex 高于 order 1 轨(顶轨在最上)')
 })
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

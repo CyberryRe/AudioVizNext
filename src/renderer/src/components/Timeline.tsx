@@ -112,8 +112,11 @@ export default function Timeline({
   const [scrollLeft, setScrollLeft] = useState(0)
   const [hViewportW, setHViewportW] = useState(800)
 
-  const videoTracks = project.tracks.filter((t) => t.zone === 'video')
-  const audioTracks = project.tracks.filter((t) => t.zone === 'audio')
+  // 视频/音频轨，按 order 升序（order 0 = 最顶 = 渲染最前）排列，保证
+  // 「时间轴从上到下」=「order 从小到大」=「渲染层叠最顶层在最上」三者一致。
+  // 不能依赖 tracks 数组原始顺序——历史上有 addVideoTrack 曾把低 order 轨追加到数组尾的漂移。
+  const videoTracks = project.tracks.filter((t) => t.zone === 'video').sort((a, b) => a.order - b.order)
+  const audioTracks = project.tracks.filter((t) => t.zone === 'audio').sort((a, b) => a.order - b.order)
 
   // 帧 → 内容内 x（相对时间内容左缘，含滚动）
   const frameToContentX = (frame: number): number => frame * pxPerFrame

@@ -603,8 +603,11 @@ export function moveClipAcrossTracks(
 }
 
 /**
- * 新增一个视频轨（自动建轨用）：插入到现有视频轨之上（order 整体 +1，新区块 order=minV）。
- * 返回新的 tracks 数组与新建轨道。
+ * 新增一个视频轨（自动建轨用）：插入到现有视频轨**之上**（顶部）。
+ * 实现：新轨 order = 现有视频轨最小 order（顶到最前 = 0 语义），现有视频轨 order 整体 +1 下移；
+ * 并把新轨**插到 tracks 数组的视频区最前**（UI 从上到下按数组顺序显示，须与 order 一致，
+ * 否则出现"order=0(该渲染最顶) 却在时间轴最底显示"的矛盾）。
+ * 返回新的 tracks 数组与新建轨道。顺序保证：数组内视频轨按 order 升序（顶→底 = 最顶层→底层）。
  */
 export function addVideoTrack(tracks: Track[], overrides?: Partial<Track>): { tracks: Track[]; track: Track } {
   const videoTracks = tracks.filter((t) => t.zone === 'video')
@@ -613,7 +616,12 @@ export function addVideoTrack(tracks: Track[], overrides?: Partial<Track>): { tr
   // 把现有 video 轨的 order 整体下移（+1），让新轨在最顶
   const shifted = tracks.map((t) => (t.zone === 'video' ? { ...t, order: t.order + 1 } : t))
   const track = createTrack({ kind: 'video', zone: 'video', order, name: `V${videoTracks.length + 1}`, ...overrides })
-  return { tracks: [...shifted, track], track }
+  // 插入到视频区最前（视频轨原本就占据数组前部；audio 追加在尾部，order 更大）。保持按 order 升序。
+  const firstVideoIdx = shifted.findIndex((t) => t.zone === 'video')
+  const insertAt = firstVideoIdx < 0 ? 0 : firstVideoIdx
+  const next = [...shifted]
+  next.splice(insertAt, 0, track)
+  return { tracks: next, track }
 }
 
 /**
