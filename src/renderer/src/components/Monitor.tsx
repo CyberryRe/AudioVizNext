@@ -3,7 +3,6 @@ import type { Project, Clip } from '../model/timeline'
 import { resolveTimeline, parseLrc, lrcLineAt } from '../model/timeline'
 import { formatTimecode } from '../model/demo'
 import { PixiRenderer } from '../pixi/PixiRenderer'
-import { effectiveMediaSrc, initMediaProxy } from '../pixi/mediaProxy'
 
 interface MonitorProps {
   project: Project
@@ -30,11 +29,6 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
 
   // 预览区可用尺寸（自适应缩放用）
   const [area, setArea] = useState({ w: 800, h: 450 })
-
-  // 媒体代理就绪计数：源转码完成后 bump，触发重渲染，令 DOM 视频/音频元素换用代理源发声。
-  // （Pixi 模式下视频代理由 PixiRenderer 自管；这里主要负责 `<audio>`/DOM `<video>` 的换源。）
-  const [proxyTick, setProxyTick] = useState(0)
-  useEffect(() => initMediaProxy(() => setProxyTick((t) => t + 1)), [])
 
   // 收集预览视频元素，随播放状态播放/暂停
   const videoRefs = useRef<(HTMLVideoElement | null)[]>([])
@@ -331,7 +325,7 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
                 {l.src && (
                   <video
                     ref={(el) => { videoRefs.current[i] = el }}
-                    src={effectiveMediaSrc(l.src)}
+                    src={l.src}
                     muted
                     loop
                     playsInline
@@ -428,17 +422,16 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
           </div>
         )}
 
-        {/* 音频 clip（不可见，仅发声）：源走 mediaProxy——若该文件已被转码出含音轨的代理(如背景视频同源)，
-            则 `<audio>` 播放 Chromium 原生能解的代理(AAC)，绕开 FFmpegDemuxer 对异型编码原文件的解码失败。
-            proxyTick 触发的重渲染会把 src 从原素材换到代理。 */}
+        {/* 音频 clip（不可见，仅发声）。语义：视频 Clip 一律静音(预览/渲染都 muted/无音频层)，
+            只有音频轨(独立音频 clip)发声。音频 clip 的源是真音频文件(mp3/wav/m4a 等)，
+            Chromium 原生即可解码，**直接播原素材即可**——切勿经媒体缓存转成 mp4 再喂 <audio>，
+            那会因 Content-Type=video/mp4 / 容器解码问题报 MEDIA_ERR_SRC_NOT_SUPPORTED(code 4)。 */}
         {audioLayers.map((l, i) => (
           <audio
             key={i}
             ref={(el) => { audioRefs.current[i] = el }}
-            src={effectiveMediaSrc(l.src)}
+            src={l.src}
             preload="metadata"
-            // avn-file:// 是自定义协议；纯 <audio> 播放(不涉及 WebGL 取帧)本无需 CORS。
-            // 若某源已转码出含音轨代理，src 已是 Chromium 原生可解的 AAC，发声正常。
             data-source-frame={l.sourceFrame}
             onError={(e) => {
               const a = e.currentTarget
