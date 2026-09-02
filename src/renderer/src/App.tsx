@@ -139,6 +139,8 @@ export default function App(): React.JSX.Element {
   )
 
   // ===== 序列设置：改比例 + 分辨率 =====
+  // 注意：只改输出画框 stage；**design(设计基准)保持不变**——这样切分辨率/比例时，
+  // 已排好的内容(视频铺满、歌词字号/位置)相对 design 不重算，只随新画框裁切/留边，不乱飞。
   const handleSetStage = useCallback((next: { ratioId: string; width: number; height: number; orientation: 'landscape' | 'portrait' }) => {
     setStageConfig(next)
     setProject((prev) => ({

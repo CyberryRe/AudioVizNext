@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Project, Clip } from '../model/timeline'
-import { resolveTimeline, parseLrc, lrcLineAt } from '../model/timeline'
+import { resolveTimeline, parseLrc, lrcLineAt, designScreenPx } from '../model/timeline'
 import { formatTimecode } from '../model/demo'
 import { PixiRenderer } from '../pixi/PixiRenderer'
 import { initAudioBlob, resolvedAudioBlob, useAudioBlobTick } from '../media/audioBlob'
@@ -353,9 +353,14 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             const isLyric = clip?.isLyrics
             // 歌词字号随预览缩放联动：真实字号按「画幅宽度比例」缩放（48px 在 1920 画幅上 = 预览里 48*(maskW/1920)），
             // 否则预览缩小后歌词仍按绝对 px 显示，看起来不随预览缩放。非歌词文本 clip 用固定字号。
-            const previewScale = maskW / width
+            // 歌词字号：以「设计基准 design」为单位排版，再按 output 画框高度等比缩放到屏上。
+            // 用冻结的 project.design.height 做分母(而非旧代码 maskW/当前stage.width)——maskW 由窗口定、
+            // stage.width 却随分辨率变，二者相除会让“同比例切分辨率(720→1080→4K)/改数字宽度”时歌词字号
+            // 被静默重算而乱飞(实测 34→61→17px)。design 冻结 → 切分辨率/比例歌词字号稳定，只随画框被裁。
+            const designH = project.design?.height ?? width
             const lyricBase = (s?.fontSize ?? 48) * (s?.scale ?? 1)
-            const fontSize = isLyric ? lyricBase * previewScale : (s?.fontSize ?? 48)
+            // 普通文本 clip 保持原“字面字号”(画框内固定 px，不缩放)；歌词才做分辨率无关归一化
+            const fontSize = isLyric ? designScreenPx(lyricBase, designH, maskH) : lyricBase
             const align = s?.align ?? 'center'
             const color = s?.color ?? '#ffffff'
             const glowOn = s?.glowEnabled ?? true

@@ -18,7 +18,8 @@ import {
   mixColor,
   parseColor,
   addVideoTrack,
-  addAudioTrack
+  addAudioTrack,
+  designScreenPx
 } from '../src/renderer/src/model/timeline.ts'
 
 let pass = 0
@@ -333,6 +334,34 @@ t('zIndex：order 越小视频轨 zIndex 越高（越靠前）', () => {
   const bot = s.videos.find((v) => v.id === 'cb')
   truthy(top && bot, '两个视频都在场景')
   truthy(top.zIndex > bot.zIndex, 'order 0 轨 zIndex 高于 order 1 轨(顶轨在最上)')
+})
+
+console.log('== 设计基准 design：分辨率无关归一化 ==')
+t('createProject 默认 design = stage（1920×1080）', () => {
+  const p = createProject({ fps: 30 })
+  eq(p.design.width, 1920, 'design.width=1920')
+  eq(p.design.height, 1080, 'design.height=1080')
+  eq(p.stage.width, 1920, 'stage.width=1920')
+})
+t('designScreenPx：以冻结 design 高度为锚，同比例切分辨率屏上字号不变', () => {
+  // 内容以 design.height=1080 排版，48px 字号
+  // 切分辨率只是 mask 在窗口内重新 fit；'适合' 模式下 maskH 由窗口定、与分辨率数值无关
+  const maskH_1080p = 774 // 1600x900 预览区、16:9 时 '适合' 的 maskH（实测）
+  // 关键：分母是冻结的 design.height(1080)，不是当前 stage.height。stage 从 1080 高切到 608 高，
+  // maskH 若仍 ~774（窗口限制），屏上字号保持 34.4px 不变 —— 旧代码用 maskW/stage.width 会跳成 61px。
+  const a = designScreenPx(48, 1080, maskH_1080p)
+  const b = designScreenPx(48, 1080, maskH_1080p)
+  eq(Math.round(a), Math.round(b), 'design 不变 → 字号不变')
+  eq(Math.round(a), Math.round(48 * (774 / 1080)), '48px @1080h 设计 → ~34px 屏上')
+})
+t('designScreenPx：数值即缩放比，高度锚定(整体等比，改比例=裁切非缩放)', () => {
+  // maskH=designH 时 1:1
+  eq(designScreenPx(100, 1080, 1080), 100, 'maskH==designH → 原样')
+  // mask 是 design 的 2 倍高 → 内容放大 2 倍（整幅等比，不单独拉伸单轴）
+  eq(designScreenPx(48, 1080, 2160), 96, 'maskH 2×designH → 字号 2×')
+  // 非法输入兜底：原样返回
+  eq(designScreenPx(48, 0, 774), 48, 'designH<=0 → 原样')
+  eq(designScreenPx(48, 1080, 0), 48, 'maskH<=0 → 原样')
 })
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

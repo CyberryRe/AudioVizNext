@@ -33,8 +33,14 @@ export interface Project {
   id: string
   /** 帧率（整数） */
   fps: number
-  /** 舞台尺寸（画布） */
+  /** 舞台尺寸（画布）＝输出画框 */
   stage: { width: number; height: number }
+  /**
+   * 设计基准画框（分辨率无关坐标基准）：内容（歌词字号、媒体铺满基准、位置比例）都相对它排版。
+   * 默认 = 首次摆放内容时的 stage；之后用户改 stage（切分辨率/比例）只是“换个输出窗口”，
+   * 内容相对 design 的几何不变 → 只裁切/留边，不重算、不乱飞。
+   */
+  design: { width: number; height: number }
   /** 轨道，order 0 = 最上层 = 渲染最前 */
   tracks: Track[]
   /** 每个轨道的 clip 列表，始终按 startFrame 升序、无重叠 */
@@ -212,6 +218,7 @@ export function createProject(overrides?: Partial<Project>): Project {
     id: 'proj-1',
     fps: 30,
     stage: { width: 1920, height: 1080 },
+    design: { width: 1920, height: 1080 },
     tracks: [],
     clips: {},
     version: 0,
@@ -395,6 +402,25 @@ export function kindFromFileName(name: string): MediaAsset['kind'] {
 /** 默认 clip 变换（归一化：x/y 为相对画布中心的偏移比例，scaleX/Y 为缩放） */
 export function defaultTransform(): Transform {
   return { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }
+}
+
+/**
+ * 分辨率无关的「画框归一化」换算。
+ *
+ * 内容（歌词字号、媒体铺满基准等）以「设计基准画框 design」为单位排版：
+ * 一个在 design.height 高画框上占 `authoredPx` 像素的元素，显示到当前
+ * “输出画框”(屏幕上即 mask)上时，应占据 `authoredPx * (maskH / design.height)` 屏上像素
+ * （以高度为锚、整体等比放大——这样横纵都同比例，切分辨率只影响裁切不影响内容缩放）。
+ *
+ * 关键：分母是**冻结的 design.height**，而不是当前 stage.height/宽度。
+ * 若像旧代码用 `maskW / stage.width`，而 maskW(屏宽)基本由窗口固定、stage.width 却随分辨率变，
+ * 会导致“同比例切分辨率(720→1080→4K)”时字号/大小被静默重算而乱飞。
+ *
+ * @returns 屏上像素
+ */
+export function designScreenPx(authoredPx: number, designH: number, maskH: number): number {
+  if (!Number.isFinite(designH) || designH <= 0 || !Number.isFinite(maskH) || maskH <= 0) return authoredPx
+  return authoredPx * (maskH / designH)
 }
 
 /** 一行 LRC 歌词 */
