@@ -449,6 +449,62 @@ export function lrcLineAt(lines: LrcLine[], sec: number): string {
   return current
 }
 
+/** 当前应高亮的歌词行索引（滚动歌词居中定位用）。无则 -1。 */
+export function lrcIndexAt(lines: LrcLine[], sec: number): number {
+  let idx = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].time <= sec) idx = i
+    else break
+  }
+  return idx
+}
+
+/**
+ * 歌词滚动滑行位置（参考 AudioViz Studio LyricsLayout.glidePos）：
+ * 返回浮动行位置 pos = currentIdx + eased，其中 eased∈[0,1]。
+ * 当前行离下一句 time 不足 SCROLL_DELTA(0.4s) 时，pos 开始从 currentIdx 平滑滑向 currentIdx+1
+ * （smoothstep 缓动）→ 让位行/目标行在行边界前 0.4s 内渐变，切句零跳变。
+ * 高亮归属仍严格由 lrcIndexAt 决定（t 未到 next.time 前仍是当前行），此处仅驱动视觉平滑位移。
+ */
+export function lrcGlide(lines: LrcLine[], sec: number): number {
+  const idx = lrcIndexAt(lines, sec)
+  if (idx < 0 || idx >= lines.length - 1) return idx
+  const remaining = lines[idx + 1].time - sec
+  const SCROLL_DELTA = 0.4
+  const raw = Math.max(0, Math.min(1, (SCROLL_DELTA - remaining) / SCROLL_DELTA))
+  const eased = raw * raw * (3 - 2 * raw)
+  return idx + eased
+}
+
+// ===== 颜色工具（歌词滚动行间混色用；hex/rgb → 混合色串）=====
+
+/** hex/rgb → {r,g,b}。解析失败回退白色。 */
+export function parseColor(c: string): { r: number; g: number; b: number } {
+  if (!c) return { r: 255, g: 255, b: 255 }
+  c = String(c).trim()
+  if (c.startsWith('#')) {
+    let h = c.replace('#', '')
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
+    const n = parseInt(h, 16)
+    if (Number.isNaN(n)) return { r: 255, g: 255, b: 255 }
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 }
+  }
+  const m = c.match(/rgba?\(([^)]+)\)/)
+  if (m) {
+    const p = m[1].split(',').map((v) => parseFloat(v.trim()))
+    return { r: p[0] || 255, g: p[1] || 255, b: p[2] || 255 }
+  }
+  return { r: 255, g: 255, b: 255 }
+}
+
+/** 颜色插值：k=0 → c1，k=1 → c2。返回 rgb 字符串（供 Pixi/DOM 统一使用）。 */
+export function mixColor(c1: string, c2: string, k: number): string {
+  const a = parseColor(c1), b = parseColor(c2)
+  const kk = Math.max(0, Math.min(1, k))
+  const mix = (x: number, y: number) => Math.round(x + (y - x) * kk)
+  return `rgb(${mix(a.r, b.r)},${mix(a.g, b.g)},${mix(a.b, b.b)})`
+}
+
 /**
  * 给 clip 绑定素材：更新 src/assetId/name。
  * 若 asset.kind 与 clip.type 兼容（video→video/image，image→image，audio→audio），

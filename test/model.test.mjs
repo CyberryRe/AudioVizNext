@@ -12,7 +12,11 @@ import {
   resizeClip,
   bindAssetToClip,
   parseLrc,
-  lrcLineAt
+  lrcLineAt,
+  lrcIndexAt,
+  lrcGlide,
+  mixColor,
+  parseColor
 } from '../src/renderer/src/model/timeline.ts'
 
 let pass = 0
@@ -222,6 +226,52 @@ t('取最后一条 time<=sec 的行', () => {
   eq(lrcLineAt(lines, 2), '第一句', '2s 显示第一句')
   eq(lrcLineAt(lines, 3.5), '第二句', '3.5s 显示第二句')
   eq(lrcLineAt(lines, 99), '第三句', '末尾之后停在最后一句')
+})
+
+console.log('== lrcIndexAt / lrcGlide 滚动定位（karaoke） ==')
+t('lrcIndexAt 返回当前高亮句索引', () => {
+  const lines = parseLrc('[00:01.00]第一句\n[00:03.00]第二句\n[00:05.00]第三句\n')
+  eq(lrcIndexAt(lines, 0), -1, '0s 尚无歌词 → -1')
+  eq(lrcIndexAt(lines, 2), 0, '2s 高亮第一句')
+  eq(lrcIndexAt(lines, 3), 1, '3s 高亮第二句（严格对 LRC 时间）')
+  eq(lrcIndexAt(lines, 4.9), 1, '4.9s 仍是第二句')
+  eq(lrcIndexAt(lines, 5), 2, '5s 高亮第三句')
+  eq(lrcIndexAt(lines, 99), 2, '末尾停在最后一句')
+})
+t('lrcGlide 行末 0.4s 内平滑让位，其余静止', () => {
+  const lines = parseLrc('[00:01.00]第一句\n[00:03.00]第二句\n[00:05.00]第三句\n')
+  // 距下一句 ≥0.4s：pos == idx（静止）
+  eq(lrcGlide(lines, 1.0), 0, '距下句 2s → pos=0')
+  eq(lrcGlide(lines, 2.0), 0, '距下句 1s → pos=0')
+  eq(lrcGlide(lines, 2.55), 0, '距下句 0.45s → pos=0（尚在 0.4s 窗口外）')
+  // 距下一句 <0.4s：开始滑行（pos 介于 idx 与 idx+1）
+  const p1 = lrcGlide(lines, 2.7) // 距下句 0.3s
+  truthy(p1 > 0 && p1 < 1, `距下句 0.3s → 0<pos<1（实际 ${p1}）`)
+  const p2 = lrcGlide(lines, 2.9) // 距下句 0.1s，更接近 1
+  truthy(p2 > p1, `距下句越近 pos 越大（${p2} > ${p1}）`)
+  // 严格边界：t=3.0 已过到第二句
+  eq(lrcGlide(lines, 3.0), 1, '3s 切换到第二句 → pos=1')
+  // 末尾：最后一行为静止（无下一句）
+  eq(lrcGlide(lines, 99), 2, '末尾句 pos=idx，静止')
+})
+t('lrcGlide 空/单行/无匹配 兜底', () => {
+  eq(lrcGlide([], 5), -1, '空数组 → -1')
+  const one = parseLrc('[00:01.00]只有一句\n')
+  eq(lrcGlide(one, 0), -1, '未到首句 → -1')
+  eq(lrcGlide(one, 2), 0, '单句 → pos=0 静止')
+})
+
+console.log('== parseColor / mixColor 歌词行混色 ==')
+t('parseColor 解析 hex/rgb，失败回退白', () => {
+  eq(parseColor('#ff0000').r, 255, 'hex 红 r')
+  eq(parseColor('#0f0').g, 255, '短 hex 绿 g')
+  eq(parseColor('rgb(0,0,255)').b, 255, 'rgb 蓝 b')
+  eq(parseColor('不合法').r, 255, '非法 → 白 255')
+})
+t('mixColor 端点插值', () => {
+  eq(mixColor('#ffffff', '#000000', 0), 'rgb(255,255,255)', 'k=0 → c1')
+  eq(mixColor('#ffffff', '#000000', 1), 'rgb(0,0,0)', 'k=1 → c2')
+  eq(mixColor('#ffffff', '#000000', 0.5), 'rgb(128,128,128)', 'k=0.5 → 中间灰')
 })
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

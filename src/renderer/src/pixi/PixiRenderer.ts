@@ -16,7 +16,7 @@ import { Application, Container, Sprite, Text, Assets, Texture, BlurFilter } fro
 // 它覆盖渲染器的 _unsafeEvalCheck 并用避免 eval 的 polyfill 替代（Electron/Chrome 扩展等严格 CSP 环境）
 import 'pixi.js/unsafe-eval'
 import type { Project } from '../model/timeline'
-import { resolveTimeline, parseLrc, lrcLineAt } from '../model/timeline'
+import { resolveTimeline, parseLrc, lrcIndexAt, lrcGlide, mixColor } from '../model/timeline'
 import type { ActiveVideoClip, ActiveImageClip, ActiveTextClip, LyricStyle } from '../model/timeline'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
@@ -34,6 +34,26 @@ interface Layer {
 
 const STAGE = { width: 1920, height: 1080 }
 
+/** 一行歌词的渲染槽（karaoke 滚动：当前句±N 行，每行独立 Text + 辉光副本） */
+interface KaraokeRow {
+  main: Text
+  glow: Text
+  blur: BlurFilter
+  glowStrength: number
+}
+
+/** 一个歌词/文本 clip 的渲染容器：root 负责位置/Z旋转/透明，rows 容纳多行文本 */
+interface TextLayer {
+  root: Container
+  rows: KaraokeRow[]
+  isLyric: boolean
+}
+
+// karaoke 滚动窗口：当前行前后各 2 行
+const KARAOKE_WINDOW = 2
+// 一行最多复用槽位（2*2+1）
+const MAX_ROWS = KARAOKE_WINDOW * 2 + 1
+
 export class PixiRenderer {
   private app: Application | null = null
   private root: Container | null = null
@@ -41,8 +61,8 @@ export class PixiRenderer {
 
   // 精灵池：key = clip id，避免频繁创建/销毁
   private sprites = new Map<string, Sprite>()
-  // 文本层：key = clip id → Container（含主文本 + 可选辉光副本）。Container 负责位置/Z旋转/透明度，子 Text 负责样式与内容
-  private textLayers = new Map<string, { root: Container; main: Text; glow: Text | null; blur: BlurFilter | null; glowStrength: number }>()
+  // 文本层：key = clip id → TextLayer（Container 负责位置/Z旋转/透明；rows 容纳 karaoke 多行歌词）
+  private textLayers = new Map<string, TextLayer>()
   // 视频元素缓存：key = src → 复用同一 <video> 做纹理源
   private videoEls = new Map<string, HTMLVideoElement>()
   // 图片异步加载去重：key = img:src → Promise
@@ -97,11 +117,17 @@ export class PixiRenderer {
     const scene = resolveTimeline(frame, project)
     this.setStage(project.stage.width, project.stage.height)
 
+    // 原始 clip 查找表（按 id）：scene 层不含 lyrics/isLyrics 等样式字段，需回查原始 clip
+    const clipMap = new Map<string, import('../model/timeline').Clip>()
+    for (const clips of Object.values(project.clips)) {
+      for (const c of clips) clipMap.set(c.id, c)
+    }
+
     // 汇聚所有可视层并排序（zIndex 决定层级）
     const layers: Layer[] = [
-      ...scene.videos.map((v) => this.toLayer(v)),
-      ...scene.images.map((i) => this.toLayer(i)),
-      ...scene.texts.map((t) => this.toLayer(t, true))
+      ...scene.videos.map((v) => this.toLayer(v, clipMap)),
+      ...scene.images.map((i) => this.toLayer(i, clipMap)),
+      ...scene.texts.map((t) => this.toLayer(t, clipMap))
     ].filter((l): l is Layer => !!l)
     layers.sort((a, b) => a.z - b.z)
 
@@ -139,18 +165,15 @@ export class PixiRenderer {
         // 移除残留文本（若曾是该 id 的文本层）
         this.releaseText(l.id, liveIds)
       } else {
-        // 文本层（歌词/文字）：Container(位置/旋转/透明) + 主 Text + 可选辉光 Text
+        // 文本层（歌词/文字）：Container(位置/旋转/透明) + 若干行 Text（karaoke 滚动）
         let tl = this.textLayers.get(l.id)
         if (!tl) {
           const root = new Container()
-          const main = new Text({ text: '' })
-          const glow = new Text({ text: '' })
-          root.addChild(glow)
-          root.addChild(main)
-          tl = { root, main, glow, blur: null, glowStrength: -1 }
+          tl = { root, rows: [], isLyric: l.isLyric }
           this.textLayers.set(l.id, tl)
           this.root.addChild(root)
         }
+        tl.isLyric = l.isLyric
         this.applyText(tl, l, project, fps)
         // 移除残留精灵
         this.releaseSprite(l.id, liveIds)
@@ -163,12 +186,23 @@ export class PixiRenderer {
     this.app.render()
   }
 
-  /** 将 Clip 抽象为 Layer */
-  private toLayer(c: ActiveVideoClip | ActiveImageClip | ActiveTextClip, isText = false): Layer | null {
+  /** 将 Clip 抽象为 Layer（回查原始 clip 拿 isLyrics/lyrics 样式） */
+  private toLayer(
+    c: ActiveVideoClip | ActiveImageClip | ActiveTextClip,
+    clipMap: Map<string, import('../model/timeline').Clip>
+  ): Layer | null {
     if (c.type === 'text') {
+      const raw = clipMap.get(c.id)
       return {
-        id: c.id, isLyric: true, z: c.zIndex, src: '', opacity: c.opacity,
-        sourceFrame: c.sourceFrame, content: c.content, transform: undefined
+        id: c.id,
+        isLyric: !!raw?.isLyrics,
+        z: c.zIndex,
+        src: '',
+        opacity: c.opacity,
+        sourceFrame: c.sourceFrame,
+        content: c.content,
+        transform: undefined,
+        lyrics: raw?.lyrics
       }
     }
     return {
@@ -230,63 +264,154 @@ export class PixiRenderer {
     if (Math.abs(el.currentTime - target) > 0.06) el.currentTime = target
   }
 
-  /** 应用文本样式与内容（歌词解析当前句）。辉光用模糊副本实现（近似 CSS text-shadow glow）。 */
-  private applyText(
-    tl: { root: Container; main: Text; glow: Text | null; blur: BlurFilter | null; glowStrength: number },
-    l: Layer,
-    project: Project,
-    fps: number
-  ): void {
+  /**
+   * 应用文本样式与内容。
+   * - 歌词 clip：karaoke 滚动渲染（当前句居中高亮、前后句跟随，0.4s 平滑让位，切句零跳变），
+   *   对齐 AudioViz Studio LyricsLayout（lrcGlide 浮动行位置 + 每行按 glide 插值 字号/颜色/透明度/辉光）。
+   * - 普通文本 clip：单行居中。
+   * 辉光用模糊副本实现（近似 CSS text-shadow glow）。
+   */
+  private applyText(tl: TextLayer, l: Layer, project: Project, fps: number): void {
     const s = l.lyrics
-    const fontSize = (s?.fontSize ?? 48) * (s?.scale ?? 1)
-    // 歌词：取当前句；普通文本：取 content
-    let text = l.content
-    if (l.isLyric) {
-      const lines = parseLrc(l.content)
-      const sec = l.sourceFrame / fps
-      text = lrcLineAt(lines, sec)
-    }
-    const display = text || ' '
-
-    const applyStyle = (t: Text): void => {
-      t.text = display
-      t.style.fill = s?.color ?? '#ffffff'
-      t.style.fontFamily = s?.fontFamily ?? 'sans-serif'
-      t.style.fontSize = fontSize
-      t.style.fontWeight = 700
-      t.style.lineHeight = fontSize * 1.4
-      t.style.wordWrap = true
-      t.style.wordWrapWidth = project.stage.width * 0.9
-      t.style.align = s?.align ?? 'center'
-      // 对齐锚点：左=左缘，右=右缘，中=中心
-      const align = s?.align ?? 'center'
-      t.anchor.set(align === 'left' ? 0 : align === 'right' ? 1 : 0.5, 0.5)
-    }
-    applyStyle(tl.main)
-
-    // 辉光：模糊 + 辉光色的副本叠在底层（复用 blur 过滤器，避免每帧重建）
+    const baseFontSize = (s?.fontSize ?? 48) * (s?.scale ?? 1)
+    const align = s?.align ?? 'center'
     const glowOn = s?.glowEnabled ?? true
-    if (glowOn) {
-      if (!tl.glow) { tl.glow = new Text({ text: '' }); tl.root.addChildAt(tl.glow, 0) }
-      const g = tl.glow
-      applyStyle(g)
-      g.style.fill = s?.glowColor ?? '#00e5ff'
-      const strength = Math.max(6, fontSize * 0.12)
-      if (!tl.blur) { tl.blur = new BlurFilter({ strength }); g.filters = [tl.blur] }
-      else if (Math.abs(tl.glowStrength - strength) > 0.5) { tl.blur.strength = strength }
-      tl.glowStrength = strength
-      g.visible = true
-    } else if (tl.glow) {
-      tl.glow.visible = false
-    }
-
+    const glowColor = s?.glowColor ?? '#00e5ff'
+    const mainColor = s?.color ?? '#ffffff'
     // 位置：画幅中心 + 偏移
     const lx = (s?.x ?? 0) * project.stage.width
     const ly = (s?.y ?? 0) * project.stage.height
     tl.root.position.set(project.stage.width / 2 + lx, project.stage.height / 2 + ly)
     tl.root.alpha = l.opacity
-    // Z 轴旋转（Pixi 原生 rotation = 平面旋转）；X/Y 轴 3D 旋转暂不支持（需自研透视投影，Phase B）
     tl.root.rotation = ((s?.rotateZ ?? 0) * Math.PI) / 180
+
+    // 窗口内的行渲染数据：{ index, text, size, color, weight, opacity, glowStrength, y }
+    type RowDatum = {
+      i: number
+      text: string
+      size: number
+      color: string
+      weight: number
+      opacity: number
+      glow: number // 辉光强度 0..1
+      y: number
+    }
+    let rows: RowDatum[] = []
+
+    if (l.isLyric) {
+      // ── karaoke 滚动歌词 ──
+      const lines = parseLrc(l.content)
+      const sec = l.sourceFrame / fps
+      const pos = lrcGlide(lines, sec) // 浮动行位置 = idx + eased
+      const cur = lrcIndexAt(lines, sec)
+      if (lines.length > 0 && cur >= 0) {
+        const glide = Math.max(0, Math.min(1, pos - cur))
+        // 行布局参数（对齐 AudioViz Studio）：当前行高亮放大 1.2×，暗行白 45%，行距 1.6×
+        const highlightScale = 1.2
+        const dimColor = 'rgba(255,255,255,0.45)'
+        const spacing = baseFontSize * 1.6
+        const start = Math.max(0, cur - KARAOKE_WINDOW)
+        const end = Math.min(lines.length - 1, cur + KARAOKE_WINDOW)
+        for (let i = start; i <= end; i++) {
+          const line = lines[i]
+          const t = Math.max(0, 1 - Math.abs(i - pos))
+          const isCurrent = i === cur
+          const isIncoming = i === cur + 1 && glide > 0
+          const hl = isCurrent ? (1 - glide) : (isIncoming ? glide : 0)
+          const size = baseFontSize * (0.62 + t * 0.38) * (1 + hl * (highlightScale - 1))
+          const y = (i - pos) * spacing
+          const color = isCurrent ? mixColor(mainColor, dimColor, glide)
+            : isIncoming ? mixColor(dimColor, mainColor, glide)
+            : dimColor
+          const weight = t > 0.5 ? 700 : 400
+          const opacity = isCurrent ? (1 - 0.75 * glide)
+            : isIncoming ? (0.25 + 0.75 * glide)
+            : (0.25 + t * 0.25)
+          // 辉光强度：仅当前/目标行随 hl 增强，其余无辉光（只留暗影由主文本承担）
+          const glow = (isCurrent || isIncoming) ? hl : 0
+          rows.push({ i, text: line.text || ' ', size, color, weight, opacity, glow, y })
+        }
+      }
+    } else {
+      // ── 普通文本 clip：单行 ──
+      rows.push({
+        i: 0,
+        text: l.content || ' ',
+        size: baseFontSize,
+        color: mainColor,
+        weight: 700,
+        opacity: 1,
+        glow: 1,
+        y: 0
+      })
+    }
+
+    // 行池复用：最多 MAX_ROWS 个槽位，逐槽更新；多余槽位隐藏
+    while (tl.rows.length < Math.max(rows.length, 1)) {
+      const main = new Text({ text: '' })
+      const glow = new Text({ text: '' })
+      const blur = new BlurFilter({ strength: 1 })
+      glow.filters = [blur]
+      glow.zIndex = 0
+      main.zIndex = 1
+      tl.root.addChild(glow)
+      tl.root.addChild(main)
+      tl.rows.push({ main, glow, blur, glowStrength: -1 })
+    }
+    const slotCount = tl.rows.length
+    for (let slot = 0; slot < slotCount; slot++) {
+      const slotRow = tl.rows[slot]
+      const datum = rows[slot]
+      if (!datum) {
+        slotRow.main.visible = false
+        slotRow.glow.visible = false
+        continue
+      }
+      slotRow.main.visible = true
+      this.styleTextRow(slotRow.main, datum, align, project, s?.fontFamily, s?.lineHeight)
+      // 辉光层（模糊副本）：强度 >0.01 才显示
+      if (glowOn && datum.glow > 0.01) {
+        this.styleTextRow(slotRow.glow, datum, align, project, s?.fontFamily, s?.lineHeight)
+        slotRow.glow.style.fill = glowColor
+        const radius = datum.glow * glowR(datum.size)
+        if (Math.abs(slotRow.glowStrength - radius) > 0.5) {
+          slotRow.blur.strength = radius
+          slotRow.glowStrength = radius
+        }
+        slotRow.glow.visible = true
+      } else {
+        slotRow.glow.visible = false
+      }
+    }
+  }
+
+  /** 计算辉光半径（对齐 DOM 两圈大辉光的折中）：当前行大字强辉光，暗行弱 */
+  private glowR(size: number): number {
+    return Math.max(4, size * 0.45)
+  }
+
+  /** 给一行 Text 套用样式、内容、位置 */
+  private styleTextRow(
+    t: Text,
+    d: { text: string; size: number; color: string; weight: number; opacity: number; y: number },
+    align: string,
+    project: Project,
+    fontFamily?: string,
+    lineHeight?: number
+  ): void {
+    t.text = d.text
+    t.style.fill = d.color
+    t.style.fontFamily = fontFamily ?? 'sans-serif'
+    t.style.fontSize = d.size
+    t.style.fontWeight = d.weight
+    t.style.lineHeight = (lineHeight ?? 1.4) * d.size
+    t.style.wordWrap = true
+    t.style.wordWrapWidth = project.stage.width * 0.9
+    t.style.align = align
+    // 对齐锚点：左=左缘，右=右缘，中=中心
+    t.anchor.set(align === 'left' ? 0 : align === 'right' ? 1 : 0.5, 0.5)
+    t.position.set(0, d.y)
+    t.alpha = d.opacity
   }
 
   private releaseText(id: string, live: Set<string>): void {
