@@ -44,8 +44,13 @@ function hasApi(): boolean {
   return typeof window !== 'undefined' && !!(window as unknown as { api?: { mediaCache?: unknown } }).api?.mediaCache
 }
 
-/** 当前应使用的有效源：已有代理用代理，否则用原素材（若未请求则后台发起 ensure）。 */
-export function effectiveVideoSrc(src: string): string {
+/**
+ * 当前应使用的有效源：已有代理用代理，否则用原素材（若未请求则后台发起 ensure）。
+ * 视频(Pixi/DOM `<video>`)与音频(`<audio>`)都可调用：只要源是本地 avn-file 且该源已被转码
+ * 出"含音视频的编辑友好代理"，一律改走代理，从而绕开 Chromium FFmpegDemuxer 对
+ * 异型编码(HEVC/高码率等)原文件的解码失败(PIPELINE_ERROR_READ → 无声/黑帧)。
+ */
+export function effectiveMediaSrc(src: string): string {
   if (proxyByOriginal.has(src)) return proxyByOriginal.get(src)!
   // 仅本地文件视频才值得代理；其余原样
   if (!pathFromAvn(src)) return src
@@ -64,6 +69,11 @@ export function effectiveVideoSrc(src: string): string {
       .catch(() => { /* 回退原素材 */ })
   }
   return src
+}
+
+/** 兼容别名：视频源解析（实现已通用，见 effectiveMediaSrc） */
+export function effectiveVideoSrc(src: string): string {
+  return effectiveMediaSrc(src)
 }
 
 /** 某个 original 源是否已有就绪代理 */

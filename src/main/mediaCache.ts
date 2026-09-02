@@ -167,11 +167,15 @@ function probeWithFfprobe(ffprobe: string, src: string): ProxyMeta['durationSec'
   }
 }
 
+// 代理格式版本：改动转码参数(如从 -an 改为保留音频轨)后 +1，令旧缓存目录名失效、强制重转，
+// 否则已存在的无音频代理会一直被命中、听不到声。目录名拼在 cacheKey 里参与 key。
+const PROXY_VERSION = 2
+
 /** 缓存键目录名：源名 + 路径哈希（同源跨会话复用） */
 function cacheKeyDir(src: string): string {
   const h = createHash('sha1').update(src).digest('hex').slice(0, 12)
   const base = basename(src).replace(/[^\w.\-]+/g, '_')
-  return `${base}_${h}`
+  return `v${PROXY_VERSION}_${base}_${h}`
 }
 
 /** 读取已缓存的 meta（存在且原路径一致则命中） */
@@ -260,17 +264,23 @@ async function runTranscode(
 /** spawn ffmpeg 转码并等待退出 */
 function spawnFfmpeg(ffmpeg: string, src: string, out: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    // 编辑友好代理：H.264 / yuv420p / faststart；去掉音频(-an,视频剪辑发声由独立 <audio> 负责)
+    // 编辑友好代理：视频 H.264 / yuv420p / faststart；并保留音频(若源含音频轨则转 AAC)。
+    // 背景视频的"原声"可经独立 <audio> 播放，同时纯音频 clip 也要能从该代理取到声音，
+    // 因此必须保留音频流（此前 -an 丢弃了音频，导致 avn-file 源非原生编码经 Chromium
+    // FFmpegDemuxer 解码失败 → PIPELINE_ERROR_READ / 无声）。
     const args = [
       '-y',
       '-i', src,
-      '-map', '0:v:0',
+      '-map', '0:v:0?',
+      '-map', '0:a:0?',
       '-c:v', 'libx264',
       '-preset', 'veryfast',
       '-crf', '20',
       '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-ac', '2',
       '-movflags', '+faststart',
-      '-an',
       '-threads', '0',
       out
     ]
