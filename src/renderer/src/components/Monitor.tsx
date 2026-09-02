@@ -194,10 +194,23 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
   useEffect(() => {
     const audios = audioRefs.current.filter((a): a is HTMLAudioElement => !!a)
     for (const a of audios) {
-      if (isPlaying) a.play().catch(() => {})
-      else a.pause()
+      if (isPlaying) {
+        // 播放时先归位到该 clip 应发声的源位置（源秒），再 play——保证无论之前暂停拖动到哪，
+        // 播放都从"这条 clip 在时间轴上该出现的声音"开始（而非从元素残留的 currentTime 起）。
+        const f = Number(a.dataset.sourceFrame || '0')
+        const target = f / fps
+        if (Number.isFinite(a.duration) && a.duration > 0 && target > 0 && Math.abs(a.currentTime - target) > 0.05) {
+          a.currentTime = target
+        }
+        a.play().catch(() => {
+          // 自动播放被拦/解码未就绪时静默，但打印一条便于定位"无声"
+          if (a.readyState < 3) console.warn('[Monitor] audio play blocked/not-ready:', a.src?.slice(0, 60), 'readyState', a.readyState)
+        })
+      } else {
+        a.pause()
+      }
     }
-  }, [isPlaying, audioLayers.length])
+  }, [isPlaying, audioLayers.length, fps])
 
   // 非播放时，把每个音频元素定位到当前帧对应的源位置（seek 用）
   useEffect(() => {
@@ -416,7 +429,13 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             ref={(el) => { audioRefs.current[i] = el }}
             src={l.src}
             preload="metadata"
+            // avn-file:// 是自定义协议，须以 CORS 模式(anonymous)加载才确保能取到数据发声
+            // （主进程 avn-file 已返回 Access-Control-Allow-Origin:*）；http(s) 远程源不设避免无 CORS 头加载失败
             data-source-frame={l.sourceFrame}
+            onError={(e) => {
+              const a = e.currentTarget
+              console.error('[Monitor] audio error:', a.src?.slice(0, 80), 'code', a.error?.code, a.error?.message, 'readyState', a.readyState)
+            }}
             style={{ display: 'none' }}
           />
         ))}
