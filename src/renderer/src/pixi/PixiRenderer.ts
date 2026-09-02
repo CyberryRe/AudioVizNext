@@ -18,6 +18,7 @@ import 'pixi.js/unsafe-eval'
 import type { Project } from '../model/timeline'
 import { resolveTimeline, parseLrc, lrcIndexAt, lrcGlide, mixColor } from '../model/timeline'
 import type { ActiveVideoClip, ActiveImageClip, ActiveTextClip, LyricStyle } from '../model/timeline'
+import { effectiveVideoSrc, initMediaProxy } from './mediaProxy'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
 interface Layer {
@@ -33,6 +34,12 @@ interface Layer {
 }
 
 const STAGE = { width: 1920, height: 1080 }
+
+/** 该 src 是否为图片（按扩展名/前缀判断；决定走 Assets 图片管线 vs 视频纹理管线） */
+function looksLikeImage(src: string): boolean {
+  const low = src.toLowerCase()
+  return /\.(png|jpe?g|gif|webp|bmp|svg)(\?|#|$)/.test(low) || low.startsWith('data:image')
+}
 
 /** 一行歌词的渲染槽（karaoke 滚动：当前句±N 行，每行独立 Text + 辉光副本） */
 interface KaraokeRow {
@@ -71,6 +78,8 @@ export class PixiRenderer {
   private imageLoading = new Map<string, Promise<unknown>>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
   private _videoShown = new Set<string>()
+  // initMediaProxy 返回的退订函数（销毁时调用）
+  private _proxyUnsub: (() => void) | null = null
   // 当前是否已挂载 canvas
   private mounted = false
 
@@ -112,6 +121,12 @@ export class PixiRenderer {
     view.style.objectFit = 'contain'
     this.canvasHost?.appendChild(view)
     this.mounted = true
+    // 订阅媒体代理就绪：原素材转码完成后，把该源重建为代理（fail-safe，失败继续用原素材）
+    this._proxyUnsub = initMediaProxy(({ original }) => {
+      // 代理就绪：回收旧 video 元素/纹理，强制下一帧从代理重建
+      this._retireVideoSrc(original)
+      if (this._latestProject) this.render(this._latestFrame, this._latestProject, this._latestFps)
+    })
   }
 
   /**
@@ -211,18 +226,20 @@ export class PixiRenderer {
     for (const l of layers) {
       liveIds.add(l.id)
       if (l.src) {
-        // 媒体层（视频/图片）
+        // 媒体层（视频/图片）。视频源可被媒体代理换成转码代理(avn 本地文件)；图片原样走 Assets。
+        const isImage = looksLikeImage(l.src)
+        const src = isImage ? l.src : effectiveVideoSrc(l.src)
+        const isVideo = !isImage
         let sp = this.sprites.get(l.id)
         if (!sp) {
           sp = new Sprite()
           this.sprites.set(l.id, sp)
           this.root.addChild(sp)
         }
-        const isVideo = this.videoEls.has(l.src)
         // 视频帧同步：把视频元素当作时间轴的"奴隶"，跟随目标源秒（帧→秒映射见 syncVideo 注释），
         // 绝不让它脱离时间轴自行循环播放。
-        if (isVideo) this.syncVideo(l.src, l.sourceFrame, fps)
-        const tex = this.textureFor(l.src)
+        if (isVideo) this.syncVideo(src, l.sourceFrame, fps)
+        const tex = this.textureFor(src)
         if (tex && sp.texture !== tex) sp.texture = tex
         // 就绪判定只认像素尺寸（v8 中 Texture 没有 `.valid` 属性；source resize 后 width/height 即真实像素数）
         const tReady = sp.texture && sp.texture.width >= 1 && sp.texture.height >= 1
@@ -316,8 +333,7 @@ export class PixiRenderer {
   /** 获取/复用纹理（视频返回 video 元素纹理） */
   private textureFor(src: string): Texture | null {
     if (!src) return null
-    const low = src.toLowerCase()
-    if (/\.(png|jpe?g|gif|webp|bmp)(\?|#|$)/.test(low) || src.startsWith('data:image')) {
+    if (looksLikeImage(src)) {
       // 图片：懒加载到 Assets 缓存（blob:/本地路径首次 load，之后复用）
       try {
         const existing = Assets.get(src)
@@ -388,6 +404,16 @@ export class PixiRenderer {
     const p = Assets.load(src).then((t) => { this.imageLoading.delete(key); return t })
     this.imageLoading.set(key, p)
     await p
+  }
+
+  /** 回收某个视频源的元素与纹理（换代理/清理时用），并从全局 Texture 缓存移除 */
+  private _retireVideoSrc(src: string): void {
+    const el = this.videoEls.get(src)
+    if (!el) { this.videoTargetSec.delete(src); return }
+    el.pause()
+    try { const t = Texture.from(el); t.destroy() } catch { /* 忽略 */ }
+    this.videoEls.delete(src)
+    this.videoTargetSec.delete(src)
   }
 
   /**
@@ -603,8 +629,10 @@ export class PixiRenderer {
   /** 销毁并清理 */
   destroy(): void {
     this.stop()
+    if (this._proxyUnsub) { this._proxyUnsub(); this._proxyUnsub = null }
     for (const el of this.videoEls.values()) el.pause()
     this.videoEls.clear()
+    this.videoTargetSec.clear()
     this.sprites.forEach((s) => s.destroy())
     this.sprites.clear()
     this.textLayers.forEach((tl) => tl.root.destroy())

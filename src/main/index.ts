@@ -1,6 +1,7 @@
-import { app, shell, BrowserWindow, protocol } from 'electron'
+import { app, shell, BrowserWindow, protocol, ipcMain } from 'electron'
 import { join, extname } from 'path'
 import { createReadStream, statSync } from 'fs'
+import { ensureProxy, mediaCacheDir, hasFfmpeg, probeVideo } from './mediaCache'
 
 /** 按扩展名返回 MIME 类型（video/audio 必须给对，否则 <video> 可能拒绝播放） */
 function mimeFor(absPath: string): string {
@@ -132,6 +133,22 @@ app.whenReady().then(() => {
       console.error('[avn-file] error:', (e as Error).message)
       return new Response('Bad request', { status: 400 })
     }
+  })
+
+  // ===== 媒体缓存(MediaCache)：渲染层请求转码代理 / 探测信息 / 能力查询 =====
+  mediaCacheDir() // 确保根缓存目录存在
+  ipcMain.handle('avs:mediaCache', async (_e, action: string, payload?: unknown) => {
+    if (action === 'ensure') {
+      const src = typeof payload === 'string' ? payload : ''
+      return ensureProxy(src)
+    }
+    if (action === 'probe') {
+      const src = typeof payload === 'string' ? payload : ''
+      return { original: src, info: probeVideo(src) }
+    }
+    if (action === 'hasFfmpeg') return hasFfmpeg()
+    if (action === 'cacheDir') return mediaCacheDir()
+    return null
   })
 
   createWindow()
