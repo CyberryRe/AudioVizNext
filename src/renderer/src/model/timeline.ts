@@ -616,16 +616,19 @@ export function addVideoTrack(tracks: Track[], overrides?: Partial<Track>): { tr
   return { tracks: [...shifted, track], track }
 }
 
-/** 从 File 对象构造 MediaAsset（本地拖入素材库）。 */
-export function assetFromFile(file: File, index = 0): MediaAsset {
+/**
+ * 从 File 对象构造 MediaAsset（本地拖入素材库）。
+ *
+ * ⚠ Electron ≥32 已移除 `File.path`（WebUtils.getPathForFile 取代之）。本函数不自行读 file.path，
+ * 而是接收调用方用 preload `window.api.getPathForFile(file)` 解析出的磁盘绝对路径：
+ *  - 拿到真实路径 → src 用 `avn-file://<path>`（持久化/重开仍有效；也让媒体缓存 MediaCache 能命中）；
+ *  - 拿不到（纯浏览器/非磁盘 File）→ 回退 blob URL 原样展示。
+ */
+export function assetFromFile(file: File, resolvedPath: string | null = null, index = 0): MediaAsset {
   const kind = kindFromFileName(file.name)
   const now = Date.now()
-  // 优先用真实文件路径（Electron 的 File.path 提供绝对路径），经 avn-file:// 协议加载：
-  //   - 持久化：工程保存/重开后 blob 会失效，路径仍有效
-  //   - 避免 data:/blob: 视频在 WebGL 下的纹理问题
-  // 拿不到 path（纯浏览器环境）时回退 blob URL。
   let src: string
-  const filePath = (file as unknown as { path?: string }).path
+  const filePath = resolvedPath && resolvedPath.length > 1 ? resolvedPath : ''
   if (filePath) {
     src = `avn-file://${encodeURIComponent(filePath)}`
   } else {

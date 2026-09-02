@@ -50,6 +50,8 @@ export function effectiveVideoSrc(src: string): string {
   // 仅本地文件视频才值得代理；其余原样
   if (!pathFromAvn(src)) return src
   if (!hasApi()) return src
+  // 每会话对某源只请求一次（ensure 幂等；后续由主进程 onProxyReady 推送就绪换代理）。
+  // 避免 rAF 播放中每帧重复 IPC。拿不到代理时静默回退原素材（fail-safe），不阻塞渲染。
   if (!requested.has(src)) {
     requested.add(src)
     const p = pathFromAvn(src)!

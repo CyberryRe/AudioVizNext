@@ -152,7 +152,13 @@ export default function App(): React.JSX.Element {
   const handleImportFiles = useCallback(async (files: File[]) => {
     if (!files || files.length === 0) return
     const next = await Promise.all(files.map(async (file) => {
-      const asset = assetFromFile(file)
+      // Electron ≥32 无 File.path，改用 preload webUtils.getPathForFile 解析真实路径 →
+      // assetFromFile 用它构造 avn-file:// 源（媒体缓存/持久化才可能命中）。拿不到则回退 blob。
+      const resolvedPath =
+        typeof window.api?.getPathForFile === 'function'
+          ? window.api.getPathForFile(file)
+          : ''
+      const asset = assetFromFile(file, resolvedPath || null)
       const dur = await probeMediaDuration(file)
       if (dur > 0) asset.durationSec = dur
       if (asset.kind === 'lyrics') {

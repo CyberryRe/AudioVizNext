@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { EnsureResult } from '../main/mediaCache'
 
 /**
@@ -30,6 +30,11 @@ const api = {
     node: process.versions.node,
     chrome: process.versions.chrome
   },
+  /**
+   * 解析拖入/选择文件的磁盘绝对路径（Electron ≥32 已移除 File.path，改用 WebUtils.getPathForFile）。
+   * 非磁盘文件返回空字符串。
+   */
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   mediaCache
 }
 

@@ -92,6 +92,9 @@ export class PixiRenderer {
   private _latestFps = 30
   // 时间轴是否正在播放（决定视频元素：播放时自由前进、暂停时精确停帧跟随）
   private _playing = false
+  // 上一次真正渲染时用的工程引用——工程变化（如新增/删除视频 clip）必须触发一次渲染，
+  // 否则暂停且帧不变时新视频元素永远不会被创建（→ 不点播放预览空白）。
+  private _lastPaintedProject: Project | null = null
 
   constructor(private host: HTMLElement) {
     this.canvasHost = host
@@ -143,24 +146,34 @@ export class PixiRenderer {
     let lastPaintedFrame = -1
     const loop = (): void => {
       if (!this._running || !this.app || !this._latestProject) return
-      const dirty = this._latestFrame !== lastPaintedFrame || this._hasAsyncWork()
-      // 帧变化或有异步媒体(视频纹理/图片加载)待处理时才真正渲染；否则静默省 CPU
+      // dirty：帧变化 || 工程变化(新增媒体层须创建元素) || 有异步媒体(视频纹理/图片加载)待落定
+      const dirty =
+        this._latestFrame !== lastPaintedFrame ||
+        this._latestProject !== this._lastPaintedProject ||
+        this._hasAsyncWork()
       if (dirty) {
         this.render(this._latestFrame, this._latestProject, this._latestFps)
         lastPaintedFrame = this._latestFrame
+        this._lastPaintedProject = this._latestProject
       }
       this._raf = requestAnimationFrame(loop)
     }
     this._raf = requestAnimationFrame(loop)
   }
 
-  /** 是否有异步待处理工作（视频未就绪/正在 seek/在播、图片加载中）——决定是否需要持续渲染等待媒体落定 */
+  /**
+   * 是否有异步待处理工作——决定是否需要持续渲染：
+   *  - 视频仍加载中(readyState<2)：就绪后需立即拉进纹理；
+   *  - 正在 seek：seek 完成前需持续渲染以抓取/钉住目标帧；
+   *  - 任一视频元素正在播放(非 paused)：正在自由前进，必须持续渲染把它拉回"奴隶"位
+   *    （暂停态若某元素失控在播，靠这里每帧 pause 压住，杜绝"暂停后还自动播"）。
+   */
   private _hasAsyncWork(): boolean {
     for (const el of this.videoEls.values()) {
-      // 仍在加载 → 就绪后需立即拉进纹理
       if (el.readyState < 2) return true
-      // 正在 seek（暂停停帧/播放校准时）→ seek 完成前需持续渲染以抓取目标帧
       if (el.seeking) return true
+      // 正在播放 = 尚未停稳(首帧解码/暂停接管中)，需继续渲染驱动到"暂停+钉帧"为止
+      if (!el.paused) return true
     }
     // 有图片仍在异步加载
     if (this.imageLoading.size > 0) return true
@@ -440,17 +453,27 @@ export class PixiRenderer {
       target = target % dur
     }
     this.videoTargetSec.set(src, target)
-    // 元数据/首帧尚未就绪：sync 不 seek，textureFor 内的 play 兜底会拉起 readyState 到可解码。
-    if (el.readyState < 2) return
+    // 尚未有可解码帧（元数据都没齐）：本帧不 seek 不 pause——让它在解码中爬升，
+    // 否则一 pause 就永远没有首帧（→ 暂停时预览空白）。
+    if (el.readyState < 2 || !el.videoWidth || !el.videoHeight) {
+      if (el.paused) el.play().catch(() => {})
+      return
+    }
     const diff = Math.abs(el.currentTime - target)
     if (this._playing) {
-      // 播放态：前进；仅明显漂移/跳帧时 seek 校准
+      // 播放态：前进；仅明显漂移/跳帧时 seek 校准（避免每帧 seek 卡顿）
       if (el.paused) el.play().catch(() => {})
       if (diff > 0.25) el.currentTime = target
     } else {
-      // 暂停态：钉帧，禁止自行前进
-      if (!el.paused) el.pause()
-      if (diff > 1 / 60) el.currentTime = target
+      // 暂停态：精确钉在目标帧，禁止自行前进。seek 到目标(触发解码该帧)后 pause 冻结，
+      // 之后由 _hasAsyncWork 的 seeking 分支持续渲染，直到 seek 完成把帧钉上。
+      if (!el.paused) {
+        if (diff > 1 / 60) el.currentTime = target
+        el.pause()
+      } else {
+        // 已暂停：仅在偏差仍大时补一次 seek（拖动进度条即时换帧）
+        if (diff > 1 / 60 && !el.seeking) el.currentTime = target
+      }
     }
   }
 
