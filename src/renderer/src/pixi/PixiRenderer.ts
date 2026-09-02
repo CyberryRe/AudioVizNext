@@ -67,6 +67,8 @@ export class PixiRenderer {
   private videoEls = new Map<string, HTMLVideoElement>()
   // 图片异步加载去重：key = img:src → Promise
   private imageLoading = new Map<string, Promise<unknown>>()
+  // 视频诊断去重（每 src 只打印一次 not-ready/invalid 日志）
+  private _videoDiag = new Set<string>()
   // 当前是否已挂载 canvas
   private mounted = false
 
@@ -149,7 +151,7 @@ export class PixiRenderer {
         if (isVideo) this.seekVideo(l.src, l.sourceFrame, fps)
         const tex = this.textureFor(l.src)
         if (tex && sp.texture !== tex) sp.texture = tex
-        if (sp.texture?.valid) {
+        if (sp.texture?.valid && sp.texture.width >= 1 && sp.texture.height >= 1) {
           // 视频纹理强制刷新到当前源帧：Pixi v8 对 video 纹理，暂停/seek 后不会自动拉新帧，
           // 必须 update() 才能把 video.currentTime 对应的帧上传到 GPU（否则拖动进度条画面不更新）。
           if (isVideo) sp.texture.update()
@@ -165,6 +167,10 @@ export class PixiRenderer {
           sp.anchor.set(0.5)
           sp.position.set(project.stage.width / 2 + dx, project.stage.height / 2 + dy)
           sp.alpha = l.opacity
+          sp.visible = true
+        } else {
+          // 纹理未就绪：隐藏精灵，避免显示默认 1x1 白块干扰判断；下一帧就绪后自动出现
+          sp.visible = false
         }
         // 移除残留文本（若曾是该 id 的文本层）
         this.releaseText(l.id, liveIds)
@@ -241,6 +247,15 @@ export class PixiRenderer {
       el.preload = 'auto'
       el.playsInline = true
       // 注意：不加 crossOrigin——avn-file:// 是自定义协议，CORS 模式反而会让视频加载失败
+      el.addEventListener('error', () => {
+        console.error('[PixiRenderer] video error:', src, el.error?.code, el.error?.message)
+      })
+      el.addEventListener('loadedmetadata', () => {
+        console.log('[PixiRenderer] video loadedmetadata:', src, 'w', el.videoWidth, 'h', el.videoHeight, 'readyState', el.readyState)
+      })
+      el.addEventListener('canplay', () => {
+        console.log('[PixiRenderer] video canplay:', src, 'readyState', el.readyState)
+      })
       this.videoEls.set(src, el)
       // 静音自动播放：Pixi v8 视频纹理需要视频持续有帧（play 状态）才能正确 upload，
       // 暂停/从未播放时 Texture.from 首次创建的是"未定义"的 destination texture，
@@ -252,6 +267,11 @@ export class PixiRenderer {
     // 故 readyState>=2 即可；再用 tex.valid/尺寸兜底二次校验防 GL_INVALID_OPERATION。
     if (el.readyState < 2 || !el.videoWidth || !el.videoHeight) {
       if (el.readyState < 2) el.play().catch(() => {})
+      // 诊断：首帧就绪前打印一次（避免刷屏，用记录标志）
+      if (!this._videoDiag.has(src)) {
+        this._videoDiag.add(src)
+        console.log(`[PixiRenderer] video not ready: readyState=${el.readyState} w=${el.videoWidth} h=${el.videoHeight} src=${src}`)
+      }
       return null
     }
     let tex: Texture | null = null
@@ -261,7 +281,13 @@ export class PixiRenderer {
       return null
     }
     // 二次校验：纹理未有效（尺寸 0 / 未 upload）则放弃本帧，等待下一帧自动重试
-    if (!tex.valid || tex.width < 1 || tex.height < 1) return null
+    if (!tex.valid || tex.width < 1 || tex.height < 1) {
+      if (!this._videoDiag.has(src)) {
+        this._videoDiag.add(src)
+        console.log(`[PixiRenderer] texture invalid: valid=${tex.valid} w=${tex.width} h=${tex.height} src=${src}`)
+      }
+      return null
+    }
     return tex
   }
 
