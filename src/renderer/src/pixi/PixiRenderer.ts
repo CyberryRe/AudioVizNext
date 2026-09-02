@@ -69,6 +69,8 @@ export class PixiRenderer {
   private imageLoading = new Map<string, Promise<unknown>>()
   // 视频诊断去重（每 src 只打印一次 not-ready/invalid 日志）
   private _videoDiag = new Set<string>()
+  // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
+  private _videoShown = new Set<string>()
   // 当前是否已挂载 canvas
   private mounted = false
 
@@ -212,7 +214,24 @@ export class PixiRenderer {
         if (sp.texture?.valid && sp.texture.width >= 1 && sp.texture.height >= 1) {
           // 视频纹理强制刷新到当前源帧：Pixi v8 对 video 纹理，暂停/seek 后不会自动拉新帧，
           // 必须 update() 才能把 video.currentTime 对应的帧上传到 GPU（否则拖动进度条画面不更新）。
-          if (isVideo) sp.texture.update()
+          if (isVideo) {
+            try {
+              sp.texture.update()
+            } catch (err) {
+              // update() 的 WebGL 错误可能被 Pixi 内部吞掉，这里显式捕获便于诊断
+              console.error('[PixiRenderer] texture.update failed:', (err as Error).message)
+            }
+          }
+          // 诊断：视频纹理首帧就绪时打印一次关键状态（用于定位黑屏）
+          if (isVideo && !this._videoShown.has(l.id)) {
+            this._videoShown.add(l.id)
+            const vel = this.videoEls.get(l.src)
+            console.log(
+              `[PixiRenderer] video texture READY: tex=${sp.texture.width}x${sp.texture.height}` +
+              ` paused=${vel?.paused} currentTime=${vel?.currentTime?.toFixed(2)}` +
+              ` src=${l.src.slice(0, 40)}`
+            )
+          }
           // 视频/图片适配画幅：contain（完整显示，不被遮罩裁剪），缩放补满画幅
           const sw = sp.texture.width, sh = sp.texture.height
           const scale = Math.max(project.stage.width / sw, project.stage.height / sh)
@@ -314,11 +333,15 @@ export class PixiRenderer {
       el.addEventListener('canplay', () => {
         console.log('[PixiRenderer] video canplay:', src, 'readyState', el.readyState)
       })
+      el.addEventListener('play', () => console.log('[PixiRenderer] video play:', src.slice(0, 40)))
+      el.addEventListener('playing', () => console.log('[PixiRenderer] video playing:', src.slice(0, 40)))
+      el.addEventListener('pause', () => console.log('[PixiRenderer] video pause:', src.slice(0, 40)))
+      el.addEventListener('seeked', () => console.log('[PixiRenderer] video seeked:', src.slice(0, 40)))
       this.videoEls.set(src, el)
-      // 静音自动播放：Pixi v8 视频纹理需要视频持续有帧（play 状态）才能正确 upload，
-      // 暂停/从未播放时 Texture.from 首次创建的是"未定义"的 destination texture，
-      // WebGL 拷贝即报 GL_INVALID_OPERATION: destination level must be defined。
-      el.play().catch(() => {})
+      el.play().then(
+        () => console.log('[PixiRenderer] play() resolved:', src.slice(0, 40)),
+        (e) => console.log('[PixiRenderer] play() rejected:', src.slice(0, 40), String(e))
+      )
     }
     // 必须有实际帧数据（HAVE_CURRENT_DATA, readyState>=2）才返回纹理；
     // 仅元数据(readyState=1)时尺寸可读但像素未就绪。此处已 play + render 前先 seek，
