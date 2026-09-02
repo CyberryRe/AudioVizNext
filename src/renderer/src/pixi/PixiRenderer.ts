@@ -144,6 +144,9 @@ export class PixiRenderer {
           this.sprites.set(l.id, sp)
           this.root.addChild(sp)
         }
+        const isVideo = this.videoEls.has(l.src)
+        // 先 seek 到当前源帧（视频必须在正确时间点才有对应帧数据）
+        if (isVideo) this.seekVideo(l.src, l.sourceFrame, fps)
         const tex = this.textureFor(l.src)
         if (tex && sp.texture !== tex) sp.texture = tex
         if (sp.texture?.valid) {
@@ -159,8 +162,6 @@ export class PixiRenderer {
           sp.anchor.set(0.5)
           sp.position.set(project.stage.width / 2 + dx, project.stage.height / 2 + dy)
           sp.alpha = l.opacity
-          // 视频定位到当前源帧
-          this.seekVideo(l.src, l.sourceFrame, fps)
         }
         // 移除残留文本（若曾是该 id 的文本层）
         this.releaseText(l.id, liveIds)
@@ -234,16 +235,30 @@ export class PixiRenderer {
       el.src = src
       el.muted = true
       el.loop = true
-      el.preload = 'metadata'
+      el.preload = 'auto'
       el.playsInline = true
+      el.crossOrigin = 'anonymous'
       this.videoEls.set(src, el)
+      // 静音自动播放：Pixi v8 视频纹理需要视频持续有帧（play 状态）才能正确 upload，
+      // 暂停/从未播放时 Texture.from 首次创建的是"未定义"的 destination texture，
+      // WebGL 拷贝即报 GL_INVALID_OPERATION: destination level must be defined。
+      el.play().catch(() => {})
     }
-    if (el.readyState === 0) el.load()
-    // 必须等有实际帧数据（HAVE_CURRENT_DATA, readyState>=2）才返回纹理；
-    // 仅元数据(readyState=1)时视频尺寸已可读，但像素数据未就绪，WebGL 拷贝会
-    // GL_INVALID_OPERATION: destination level must be defined。
-    if (el.readyState < 2 || !el.videoWidth || !el.videoHeight) return null
-    const tex = Texture.from(el)
+    // 必须等有实际帧数据（HAVE_ENOUGH_DATA, readyState>=4）才返回纹理；
+    // readyState 2/3 虽标称有当前帧，但若视频 paused/从未播过，像素尚未真正解码，
+    // Texture.from 首次 upload 会因 destination texture 未定义报 GL_INVALID_OPERATION。
+    if (el.readyState < 4 || !el.videoWidth || !el.videoHeight) {
+      if (el.readyState < 4) el.play().catch(() => {})
+      return null
+    }
+    let tex: Texture | null = null
+    try {
+      tex = Texture.from(el)
+    } catch {
+      return null
+    }
+    // 二次校验：纹理未有效（尺寸 0 / 未 upload）则放弃本帧，等待下一帧自动重试
+    if (!tex.valid || tex.width < 1 || tex.height < 1) return null
     return tex
   }
 
@@ -373,7 +388,7 @@ export class PixiRenderer {
       if (glowOn && datum.glow > 0.01) {
         this.styleTextRow(slotRow.glow, datum, align, project, s?.fontFamily, s?.lineHeight)
         slotRow.glow.style.fill = glowColor
-        const radius = datum.glow * glowR(datum.size)
+        const radius = datum.glow * this.glowR(datum.size)
         if (Math.abs(slotRow.glowStrength - radius) > 0.5) {
           slotRow.blur.strength = radius
           slotRow.glowStrength = radius
