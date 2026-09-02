@@ -358,7 +358,12 @@ export class PixiRenderer {
     let tex: Texture | null = null
     try {
       tex = Texture.from(el)
-    } catch {
+    } catch (err) {
+      // 诊断盲区：Texture.from 对播放中的 blob 视频可能反复抛错被静默吞掉
+      if (!this._videoDiag.has(src)) {
+        this._videoDiag.add(src)
+        console.error('[PixiRenderer] Texture.from threw:', (err as Error).message, 'src', src.slice(0, 40))
+      }
       return null
     }
     // 二次校验：纹理未有效（尺寸 0 / 未 upload）则放弃本帧，等待下一帧自动重试
