@@ -71,6 +71,8 @@ export class PixiRenderer {
   private _videoDiag = new Set<string>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
   private _videoShown = new Set<string>()
+  // 渲染帧计数（用于节流诊断日志）
+  private _frameCount = 0
   // 当前是否已挂载 canvas
   private mounted = false
 
@@ -176,6 +178,7 @@ export class PixiRenderer {
    */
   render(frame: number, project: Project, fps: number): void {
     if (!this.app || !this.root) return
+    this._frameCount++
     const scene = resolveTimeline(frame, project)
     this.setStage(project.stage.width, project.stage.height)
 
@@ -211,6 +214,15 @@ export class PixiRenderer {
         if (isVideo) this.seekVideo(l.src, l.sourceFrame, fps)
         const tex = this.textureFor(l.src)
         if (tex && sp.texture !== tex) sp.texture = tex
+        // 诊断：节流打印视频层每次处理路径（每 ~10 帧一次），定位黑屏卡点
+        if (isVideo && this._frameCount % 10 === 0) {
+          const vel = this.videoEls.get(l.src)
+          console.log(
+            `[PixiRenderer] TRACE videoLayer: isVideo=${isVideo} readyState=${vel?.readyState} ` +
+            `vwh=${vel?.videoWidth}x${vel?.videoHeight} tex=${tex ? `${tex.width}x${tex.height}valid=${tex.valid}` : 'null'} ` +
+            `spTex=${sp.texture ? `${sp.texture.width}x${sp.texture.height}valid=${sp.texture.valid}` : 'none'}`
+          )
+        }
         if (sp.texture?.valid && sp.texture.width >= 1 && sp.texture.height >= 1) {
           // 视频纹理强制刷新到当前源帧：Pixi v8 对 video 纹理，暂停/seek 后不会自动拉新帧，
           // 必须 update() 才能把 video.currentTime 对应的帧上传到 GPU（否则拖动进度条画面不更新）。
