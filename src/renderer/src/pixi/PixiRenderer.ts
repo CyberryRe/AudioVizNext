@@ -65,6 +65,8 @@ export class PixiRenderer {
   private textLayers = new Map<string, TextLayer>()
   // 视频元素缓存：key = src → 复用同一 <video> 做纹理源
   private videoEls = new Map<string, HTMLVideoElement>()
+  // 每个视频元素当前应停靠/播放的目标源秒（避免每帧重复 seek 造成卡顿）
+  private videoTargetSec = new Map<string, number>()
   // 图片异步加载去重：key = img:src → Promise
   private imageLoading = new Map<string, Promise<unknown>>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
@@ -79,6 +81,8 @@ export class PixiRenderer {
   private _latestFrame = 0
   private _latestProject: Project | null = null
   private _latestFps = 30
+  // 时间轴是否正在播放（决定视频元素：播放时自由前进、暂停时精确停帧跟随）
+  private _playing = false
 
   constructor(private host: HTMLElement) {
     this.canvasHost = host
@@ -114,10 +118,11 @@ export class PixiRenderer {
    * 记录最新输入并启动内部渲染循环。之后 Pixi 自身每 rAF 渲染一次，
    * 不依赖 React 的 frame 变化——视频/图片异步就绪后下一帧自动出现。
    */
-  start(frame: number, project: Project, fps: number): void {
+  start(frame: number, project: Project, fps: number, playing = false): void {
     this._latestFrame = frame
     this._latestProject = project
     this._latestFps = fps
+    this._playing = playing
     if (this._running) return
     this._running = true
     let lastPaintedFrame = -1
@@ -134,22 +139,33 @@ export class PixiRenderer {
     this._raf = requestAnimationFrame(loop)
   }
 
-  /** 是否有异步待处理工作（视频纹理未就绪/未在播、图片加载中）——决定是否需要持续渲染等待媒体出现 */
+  /** 是否有异步待处理工作（视频未就绪/正在 seek/在播、图片加载中）——决定是否需要持续渲染等待媒体落定 */
   private _hasAsyncWork(): boolean {
-    // 有视频元素且任一 readyState<2（还在加载，就绪后需立即拉进纹理）→ 持续渲染
     for (const el of this.videoEls.values()) {
+      // 仍在加载 → 就绪后需立即拉进纹理
       if (el.readyState < 2) return true
+      // 正在 seek（暂停停帧/播放校准时）→ seek 完成前需持续渲染以抓取目标帧
+      if (el.seeking) return true
     }
     // 有图片仍在异步加载
     if (this.imageLoading.size > 0) return true
     return false
   }
 
-  /** 更新渲染输入（外部 frame/工程变化时调用；循环会自动接住） */
-  updateInput(frame: number, project: Project, fps: number): void {
+  /** 更新渲染输入（外部 frame/工程/播放状态变化时调用；循环会自动接住） */
+  updateInput(frame: number, project: Project, fps: number, playing?: boolean): void {
     this._latestFrame = frame
     this._latestProject = project
     this._latestFps = fps
+    if (playing !== undefined) this._playing = playing
+  }
+
+  /** 通知时间轴播放/暂停状态变化（供视频元素跟随：播放则前进、暂停则停帧） */
+  setPlaying(playing: boolean): void {
+    if (this._playing === playing) return
+    this._playing = playing
+    // 状态翻转必须立刻生效：立即触发一次渲染同步所有视频元素，不等下一帧变化
+    if (this._latestProject) this.render(this._latestFrame, this._latestProject, this._latestFps)
   }
 
   /** 停止内部渲染循环 */
@@ -203,8 +219,9 @@ export class PixiRenderer {
           this.root.addChild(sp)
         }
         const isVideo = this.videoEls.has(l.src)
-        // 先 seek 到当前源帧（视频必须在正确时间点才有对应帧数据）
-        if (isVideo) this.seekVideo(l.src, l.sourceFrame, fps)
+        // 视频帧同步：把视频元素当作时间轴的"奴隶"，跟随目标源秒（帧→秒映射见 syncVideo 注释），
+        // 绝不让它脱离时间轴自行循环播放。
+        if (isVideo) this.syncVideo(l.src, l.sourceFrame, fps)
         const tex = this.textureFor(l.src)
         if (tex && sp.texture !== tex) sp.texture = tex
         // 就绪判定只认像素尺寸（v8 中 Texture 没有 `.valid` 属性；source resize 后 width/height 即真实像素数）
@@ -373,12 +390,42 @@ export class PixiRenderer {
     await p
   }
 
-  /** 定位视频源帧（非播放时用于精确 seek） */
-  private seekVideo(src: string, sourceFrame: number, fps: number): void {
+  /**
+   * 帧同步视频：把视频元素当作时间轴的"奴隶"，让它停靠/播放到目标源秒，绝不脱离时间轴自由循环。
+   *
+   * 目标源秒的换算（关键）：resolveTimeline 产出的 sourceFrame 一律以「工程帧率 fps(帧/秒)」为刻度，
+   * 故目标源秒 = sourceFrame / fps。这在数学上等价于"素材在真实时间轴上走到第几秒"，
+   * 与素材自身的原始帧率(24/25/60)无关——因为预览按墙钟实时推进，素材也按真实时间播放，
+   * 二者在"第几秒"对齐即正确；素材帧率只影响解码粒度，不影响应显示的秒位置。
+   *
+   * 行为分两态：
+   *  - 播放态(_playing)：让素材自由前进，只有偏离目标 >0.25s 才 seek 校正（避免每帧 seek 卡顿），
+   *    素材在播放时会按自身帧率平滑走帧，帧同步由"墙钟=实时"天然保证。
+   *  - 暂停态：素材必须精确钉在目标帧——pause + 亚帧误差内 seek 到 exact 秒（拖动/停帧即时可见）。
+   *  - Clip 时长 > 素材时长（拉长填满）：目标秒对 duration 取模回绕 → 受控循环而非自由乱播。
+   */
+  private syncVideo(src: string, sourceFrame: number, fps: number): void {
     const el = this.videoEls.get(src)
     if (!el) return
-    const target = sourceFrame / fps
-    if (Math.abs(el.currentTime - target) > 0.06) el.currentTime = target
+    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0
+    let target = sourceFrame / fps
+    // 拉长填满：超过素材末尾则回绕（等价于素材自然循环，但受时间轴控制）
+    if (dur > 0.2 && target >= dur) {
+      target = target % dur
+    }
+    this.videoTargetSec.set(src, target)
+    // 元数据/首帧尚未就绪：sync 不 seek，textureFor 内的 play 兜底会拉起 readyState 到可解码。
+    if (el.readyState < 2) return
+    const diff = Math.abs(el.currentTime - target)
+    if (this._playing) {
+      // 播放态：前进；仅明显漂移/跳帧时 seek 校准
+      if (el.paused) el.play().catch(() => {})
+      if (diff > 0.25) el.currentTime = target
+    } else {
+      // 暂停态：钉帧，禁止自行前进
+      if (!el.paused) el.pause()
+      if (diff > 1 / 60) el.currentTime = target
+    }
   }
 
   /**

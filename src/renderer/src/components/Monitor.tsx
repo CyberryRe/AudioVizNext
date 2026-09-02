@@ -51,7 +51,7 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
     pr.init()
       .then(() => {
         if (cancelled) { pr.destroy(); return }
-        pr.start(frame, project, fps)
+        pr.start(frame, project, fps, isPlaying)
       })
       .catch((e) => { if (!cancelled) setPixiErr(String(e?.message ?? e)) })
     return () => {
@@ -61,11 +61,12 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
       if (pixiRef.current === pr) pixiRef.current = null
     }
   }, [pixiOn])
-  // 每次帧/工程变化时更新 Pixi 渲染输入（内部循环自动接住并渲染）
+  // 每次帧/工程/播放状态变化时更新 Pixi 渲染输入；播放态翻转用 setPlaying 强制立即同步视频(暂停即停帧)
   useEffect(() => {
     if (!pixiOn) return
     pixiRef.current?.updateInput(frame, project, fps)
-  }, [pixiOn, frame, project, fps])
+    pixiRef.current?.setPlaying(isPlaying)
+  }, [pixiOn, frame, project, fps, isPlaying])
 
   // 监听预览区尺寸，自适应缩放画幅(Mask)，改比例/窗口大小都会跟随
   useEffect(() => {
