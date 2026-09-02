@@ -3,6 +3,7 @@ import type { Project, Clip } from '../model/timeline'
 import { resolveTimeline, parseLrc, lrcLineAt } from '../model/timeline'
 import { formatTimecode } from '../model/demo'
 import { PixiRenderer } from '../pixi/PixiRenderer'
+import { initAudioBlob, resolvedAudioBlob, useAudioBlobTick } from '../media/audioBlob'
 
 interface MonitorProps {
   project: Project
@@ -29,6 +30,8 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
 
   // 预览区可用尺寸（自适应缩放用）
   const [area, setArea] = useState({ w: 800, h: 450 })
+  // 音频 blob 就绪 tick：任一本地音频源打成 blob URL 后 bump，重渲染把 <audio> 换到 blob 源
+  useAudioBlobTick()
 
   // 收集预览视频元素，随播放状态播放/暂停
   const videoRefs = useRef<(HTMLVideoElement | null)[]>([])
@@ -162,6 +165,11 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
   textLayers.sort((a, b) => a.z - b.z)
   // 音频 clip（不可见，仅用于发声）
   const audioLayers = scene.audios.map((a) => ({ src: a.src, volume: a.volume, sourceFrame: a.sourceFrame }))
+  // 对每个本地音频源发起 blob 化(幂等)。Chromium FFmpegDemuxer 对 avn-file 流式协议解 mp3 不可靠，
+  // 走 blob URL 才稳定；就绪后 useAudioBlobTick 触发换源重渲染。
+  useEffect(() => {
+    for (const a of audioLayers) initAudioBlob(a.src)
+  }, [audioLayers])
 
   // clip 查找表（按 id），用于拿歌词样式等原始 clip 属性
   const clipLookup = useRef<Map<string, Clip>>(new Map())
@@ -423,14 +431,14 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
         )}
 
         {/* 音频 clip（不可见，仅发声）。语义：视频 Clip 一律静音(预览/渲染都 muted/无音频层)，
-            只有音频轨(独立音频 clip)发声。音频 clip 的源是真音频文件(mp3/wav/m4a 等)，
-            Chromium 原生即可解码，**直接播原素材即可**——切勿经媒体缓存转成 mp4 再喂 <audio>，
-            那会因 Content-Type=video/mp4 / 容器解码问题报 MEDIA_ERR_SRC_NOT_SUPPORTED(code 4)。 */}
+            只有音频轨(独立音频 clip)发声。本地音频(mp3/wav/m4a)Chromium 原生可解，但经
+            avn-file:// 自定义流式协议会被 FFmpegDemuxer 拒(PIPELINE_ERROR_READ/code 2)，
+            故打成 blob: URL(进程内原生解码)播放；blob 未就绪先回退原素材，就绪后换 blob。 */}
         {audioLayers.map((l, i) => (
           <audio
             key={i}
             ref={(el) => { audioRefs.current[i] = el }}
-            src={l.src}
+            src={resolvedAudioBlob(l.src) ?? l.src}
             preload="metadata"
             data-source-frame={l.sourceFrame}
             onError={(e) => {

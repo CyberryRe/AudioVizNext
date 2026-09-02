@@ -35,6 +35,13 @@ const api = {
    * 非磁盘文件返回空字符串。
    */
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  /**
+   * 读取磁盘文件全部字节（返回 Uint8Array）。用于把本地音频打包成 blob: URL 播放——
+   * Chromium 的 FFmpegDemuxer 对 avn-file:// 自定义流式协议不可靠(PIPELINE_ERROR_READ)，
+   * blob 走进程内原生解码器则万无一失。
+   */
+  readFileBytes: (filePath: string): Promise<Uint8Array> =>
+    ipcRenderer.invoke('avs:readFileBytes', filePath) as Promise<Uint8Array>,
   mediaCache
 }
 

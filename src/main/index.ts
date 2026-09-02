@@ -1,6 +1,6 @@
 import { app, shell, BrowserWindow, protocol, ipcMain } from 'electron'
 import { join, extname } from 'path'
-import { createReadStream, statSync } from 'fs'
+import { createReadStream, statSync, readFileSync } from 'fs'
 import { ensureProxy, mediaCacheDir, hasFfmpeg, probeVideo } from './mediaCache'
 
 /** 按扩展名返回 MIME 类型（video/audio 必须给对，否则 <video> 可能拒绝播放） */
@@ -103,10 +103,28 @@ app.whenReady().then(() => {
       const size = statSync(absPath).size
       const mime = mimeFor(absPath)
       const range = request.headers.get('Range')
-      if (range) {
-        const m = /bytes=(\d*)-(\d*)/.exec(range)
-        const start = m && m[1] ? parseInt(m[1], 10) : 0
-        const end = m && m[2] ? parseInt(m[2], 10) : size - 1
+      if (range && range.startsWith('bytes=')) {
+        // 解析单段 Range，覆盖三种形态（Chromium 媒体栈/FFmpegDemuxer 会发后缀区间）：
+        //   bytes=start-end   固定区间
+        //   bytes=start-      从 start 到文件尾
+        //   bytes=-suffixLen  末尾 suffixLen 字节（此前被误当 0..suffixLen，返回错误字节致解码器读坏）
+        const spec = range.slice('bytes='.length).split(',')[0].trim()
+        const dash = spec.indexOf('-')
+        const a = dash >= 0 ? spec.slice(0, dash) : spec
+        const b = dash >= 0 ? spec.slice(dash + 1) : ''
+        let start: number
+        let end: number
+        if (a === '') {
+          // suffix 区间 bytes=-N → 取末尾 N 字节
+          const n = parseInt(b, 10)
+          start = Math.max(0, size - (Number.isFinite(n) ? n : size))
+          end = size - 1
+        } else {
+          start = parseInt(a, 10)
+          end = b === '' ? size - 1 : parseInt(b, 10)
+        }
+        if (!Number.isFinite(start)) start = 0
+        if (!Number.isFinite(end)) end = size - 1
         const safeStart = Math.max(0, Math.min(start, size - 1))
         const safeEnd = Math.max(safeStart, Math.min(end, size - 1))
         const stream = createReadStream(absPath, { start: safeStart, end: safeEnd })
@@ -153,6 +171,29 @@ app.whenReady().then(() => {
     if (action === 'hasFfmpeg') return hasFfmpeg()
     if (action === 'cacheDir') return mediaCacheDir()
     return null
+  })
+
+  // ===== 读取磁盘文件字节(供音频 clip 打成 blob: URL 播放) =====
+  // Chromium FFmpegDemuxer 对 avn-file:// 自定义流式协议的随机区间读不可靠，会 PIPELINE_ERROR_READ。
+  // 音频文件通常较小(几 MB)，直接整读回传，渲染层 new Blob+createObjectURL 用进程内原生解码器播放。
+  ipcMain.handle('avs:readFileBytes', async (_e, filePath: unknown) => {
+    const p = typeof filePath === 'string' ? filePath : ''
+    if (!p) return new Uint8Array(0)
+    try {
+      // 限制避免把超大视频整读进内存（该接口面向音频/小文件）
+      const st = statSync(p)
+      if (!st.isFile()) return new Uint8Array(0)
+      if (st.size > 200 * 1024 * 1024) {
+        console.warn('[avs:readFileBytes] too large, skip:', p)
+        return new Uint8Array(0)
+      }
+      const buf = readFileSync(p)
+      // Electron IPC 结构化克隆：Uint8Array 视图跨进程可传递，渲染层可直接 new Blob
+      return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
+    } catch (e) {
+      console.error('[avs:readFileBytes] failed:', p, (e as Error).message)
+      return new Uint8Array(0)
+    }
   })
 
   createWindow()
