@@ -40,7 +40,7 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
   const [pixiErr, setPixiErr] = useState<string | null>(null)
   const pixiRef = useRef<PixiRenderer | null>(null)
   const pixiHostRef = useRef<HTMLDivElement>(null)
-  // 初始化 PixiRenderer（懒加载，切到开启时初始化一次）
+  // 初始化 PixiRenderer（懒加载，切到开启时初始化一次），初始化完成后启动内部连续渲染循环
   useEffect(() => {
     if (!pixiOn) return
     let cancelled = false
@@ -49,14 +49,22 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
     const pr = new PixiRenderer(host)
     pixiRef.current = pr
     pr.init()
-      .then(() => { if (cancelled) pr.destroy() })
+      .then(() => {
+        if (cancelled) { pr.destroy(); return }
+        pr.start(frame, project, fps)
+      })
       .catch((e) => { if (!cancelled) setPixiErr(String(e?.message ?? e)) })
-    return () => { cancelled = true; pixiRef.current = null }
+    return () => {
+      cancelled = true
+      // 关闭 Pixi 时彻底销毁（含 canvas 卸载），避免残留层
+      pr.destroy()
+      if (pixiRef.current === pr) pixiRef.current = null
+    }
   }, [pixiOn])
-  // 每帧喂给 PixiRenderer 渲染
+  // 每次帧/工程变化时更新 Pixi 渲染输入（内部循环自动接住并渲染）
   useEffect(() => {
     if (!pixiOn) return
-    pixiRef.current?.render(frame, project, fps)
+    pixiRef.current?.updateInput(frame, project, fps)
   }, [pixiOn, frame, project, fps])
 
   // 监听预览区尺寸，自适应缩放画幅(Mask)，改比例/窗口大小都会跟随

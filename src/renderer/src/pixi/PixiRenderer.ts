@@ -72,6 +72,16 @@ export class PixiRenderer {
   // 当前是否已挂载 canvas
   private mounted = false
 
+  // —— 连续渲染循环（Pixi 视频纹理依赖：视频元素就绪是异步事件，React 帧不变就不会调 render，
+  //    导致视频 canplay 后永远不被拉进纹理。故内部跑 rAF 持续渲染，保证异步媒体出现/纹理刷新）。 ——
+  private _raf = 0
+  private _running = false
+  private _latestFrame = 0
+  private _latestProject: Project | null = null
+  private _latestFps = 30
+  // 无媒体(纯文字/空场景)时降频，避免无谓 CPU；有视频时全速
+  private _hasVideoLast = false
+
   constructor(private host: HTMLElement) {
     this.canvasHost = host
   }
@@ -100,6 +110,54 @@ export class PixiRenderer {
     view.style.objectFit = 'contain'
     this.canvasHost?.appendChild(view)
     this.mounted = true
+  }
+
+  /**
+   * 记录最新输入并启动内部渲染循环。之后 Pixi 自身每 rAF 渲染一次，
+   * 不依赖 React 的 frame 变化——视频/图片异步就绪后下一帧自动出现。
+   */
+  start(frame: number, project: Project, fps: number): void {
+    this._latestFrame = frame
+    this._latestProject = project
+    this._latestFps = fps
+    if (this._running) return
+    this._running = true
+    let lastPaintedFrame = -1
+    const loop = (): void => {
+      if (!this._running || !this.app || !this._latestProject) return
+      const dirty = this._latestFrame !== lastPaintedFrame || this._hasAsyncWork()
+      // 帧变化或有异步媒体(视频纹理/图片加载)待处理时才真正渲染；否则静默省 CPU
+      if (dirty) {
+        this.render(this._latestFrame, this._latestProject, this._latestFps)
+        lastPaintedFrame = this._latestFrame
+      }
+      this._raf = requestAnimationFrame(loop)
+    }
+    this._raf = requestAnimationFrame(loop)
+  }
+
+  /** 是否有异步待处理工作（视频纹理未就绪/未在播、图片加载中）——决定是否需要持续渲染等待媒体出现 */
+  private _hasAsyncWork(): boolean {
+    // 有视频元素且任一 readyState<2（还在加载，就绪后需立即拉进纹理）→ 持续渲染
+    for (const el of this.videoEls.values()) {
+      if (el.readyState < 2) return true
+    }
+    // 有图片仍在异步加载
+    if (this.imageLoading.size > 0) return true
+    return false
+  }
+
+  /** 更新渲染输入（外部 frame/工程变化时调用；循环会自动接住） */
+  updateInput(frame: number, project: Project, fps: number): void {
+    this._latestFrame = frame
+    this._latestProject = project
+    this._latestFps = fps
+  }
+
+  /** 停止内部渲染循环 */
+  stop(): void {
+    this._running = false
+    cancelAnimationFrame(this._raf)
   }
 
   /** 适配：canvas 尺寸跟随画幅真实分辨率；外部用 CSS objectFit 缩放显示 */
@@ -482,6 +540,7 @@ export class PixiRenderer {
 
   /** 销毁并清理 */
   destroy(): void {
+    this.stop()
     for (const el of this.videoEls.values()) el.pause()
     this.videoEls.clear()
     this.sprites.forEach((s) => s.destroy())
