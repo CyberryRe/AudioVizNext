@@ -257,14 +257,6 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
           overflow: 'hidden'
         }}
       >
-        {/* Pixi 渲染后端宿主（开启时挂 WebGL canvas，渲染媒体+文字；遮罩/音频仍在 DOM 叠加） */}
-        <div ref={pixiHostRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
-        {pixiErr && (
-          <div style={{ position: 'absolute', top: 8, left: 8, color: '#ff8080', fontSize: 11, background: 'rgba(0,0,0,.7)', padding: '4px 8px', borderRadius: 3, zIndex: 20 }}>
-            Pixi 初始化失败（已回退 DOM 渲染）：{pixiErr}
-          </div>
-        )}
-
         {/* 画幅(Mask)窗口：边框 + 外部压暗，标明"最终渲染取哪一部分"。始终渲染（Pixi/DOM 模式都在） */}
         <div
           style={{
@@ -283,6 +275,10 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
             pointerEvents: 'none'
           }}
         >
+          {/* Pixi 渲染后端宿主：铺满遮罩(Mask)窗口内部，1920×1080 舞台按比例映射到遮罩矩形。
+              放在遮罩内部（而非外层整块预览区）才能让 Pixi 输出与遮罩/画幅严格对齐，
+              否则会铺满整个预览区、明显大于遮罩且对不齐。 */}
+          <div ref={pixiHostRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
           {!pixiOn && (<>
           {/* 媒体内容层：完整显示原素材（objectFit:contain，绝不按遮罩比例裁剪），中心对齐画幅；可被变换移动 */}
           {mediaLayers.map((l, i) => {
@@ -404,6 +400,13 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
           )}
           </>)}
         </div>
+
+        {/* Pixi 初始化失败提示（两种渲染模式下都叠在预览区上方） */}
+        {pixiErr && (
+          <div style={{ position: 'absolute', top: 8, left: 8, color: '#ff8080', fontSize: 11, background: 'rgba(0,0,0,.7)', padding: '4px 8px', borderRadius: 3, zIndex: 20 }}>
+            Pixi 初始化失败（已回退 DOM 渲染）：{pixiErr}
+          </div>
+        )}
 
         {/* 音频 clip（不可见，仅发声） */}
         {audioLayers.map((l, i) => (

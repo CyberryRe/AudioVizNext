@@ -67,12 +67,8 @@ export class PixiRenderer {
   private videoEls = new Map<string, HTMLVideoElement>()
   // 图片异步加载去重：key = img:src → Promise
   private imageLoading = new Map<string, Promise<unknown>>()
-  // 视频诊断去重（每 src 只打印一次 not-ready/invalid 日志）
-  private _videoDiag = new Set<string>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
   private _videoShown = new Set<string>()
-  // 渲染帧计数（用于节流诊断日志）
-  private _frameCount = 0
   // 当前是否已挂载 canvas
   private mounted = false
 
@@ -83,8 +79,6 @@ export class PixiRenderer {
   private _latestFrame = 0
   private _latestProject: Project | null = null
   private _latestFps = 30
-  // 无媒体(纯文字/空场景)时降频，避免无谓 CPU；有视频时全速
-  private _hasVideoLast = false
 
   constructor(private host: HTMLElement) {
     this.canvasHost = host
@@ -178,7 +172,6 @@ export class PixiRenderer {
    */
   render(frame: number, project: Project, fps: number): void {
     if (!this.app || !this.root) return
-    this._frameCount++
     const scene = resolveTimeline(frame, project)
     this.setStage(project.stage.width, project.stage.height)
 
@@ -214,16 +207,9 @@ export class PixiRenderer {
         if (isVideo) this.seekVideo(l.src, l.sourceFrame, fps)
         const tex = this.textureFor(l.src)
         if (tex && sp.texture !== tex) sp.texture = tex
-        // 诊断：节流打印视频层每次处理路径（每 ~10 帧一次），定位黑屏卡点
-        if (isVideo && this._frameCount % 10 === 0) {
-          const vel = this.videoEls.get(l.src)
-          console.log(
-            `[PixiRenderer] TRACE videoLayer: isVideo=${isVideo} readyState=${vel?.readyState} ` +
-            `vwh=${vel?.videoWidth}x${vel?.videoHeight} tex=${tex ? `${tex.width}x${tex.height}valid=${tex.valid}` : 'null'} ` +
-            `spTex=${sp.texture ? `${sp.texture.width}x${sp.texture.height}valid=${sp.texture.valid}` : 'none'}`
-          )
-        }
-        if (sp.texture?.valid && sp.texture.width >= 1 && sp.texture.height >= 1) {
+        // 就绪判定只认像素尺寸（v8 中 Texture 没有 `.valid` 属性；source resize 后 width/height 即真实像素数）
+        const tReady = sp.texture && sp.texture.width >= 1 && sp.texture.height >= 1
+        if (tReady) {
           // 视频纹理强制刷新到当前源帧：Pixi v8 对 video 纹理，暂停/seek 后不会自动拉新帧，
           // 必须 update() 才能把 video.currentTime 对应的帧上传到 GPU（否则拖动进度条画面不更新）。
           if (isVideo) {
@@ -258,7 +244,7 @@ export class PixiRenderer {
           sp.alpha = l.opacity
           sp.visible = true
         } else {
-          // 纹理未就绪：隐藏精灵，避免显示默认 1x1 白块干扰判断；下一帧就绪后自动出现
+          // 纹理未就绪（源尚未 resize 出尺寸）：隐藏精灵，避免显示默认 1x1 白块干扰判断；下一帧就绪后自动出现
           sp.visible = false
         }
         // 移除残留文本（若曾是该 id 的文本层）
@@ -339,51 +325,40 @@ export class PixiRenderer {
       el.addEventListener('error', () => {
         console.error('[PixiRenderer] video error:', src, el.error?.code, el.error?.message)
       })
-      el.addEventListener('loadedmetadata', () => {
-        console.log('[PixiRenderer] video loadedmetadata:', src, 'w', el.videoWidth, 'h', el.videoHeight, 'readyState', el.readyState)
-      })
-      el.addEventListener('canplay', () => {
-        console.log('[PixiRenderer] video canplay:', src, 'readyState', el.readyState)
-      })
-      el.addEventListener('play', () => console.log('[PixiRenderer] video play:', src.slice(0, 40)))
-      el.addEventListener('playing', () => console.log('[PixiRenderer] video playing:', src.slice(0, 40)))
-      el.addEventListener('pause', () => console.log('[PixiRenderer] video pause:', src.slice(0, 40)))
-      el.addEventListener('seeked', () => console.log('[PixiRenderer] video seeked:', src.slice(0, 40)))
       this.videoEls.set(src, el)
-      el.play().then(
-        () => console.log('[PixiRenderer] play() resolved:', src.slice(0, 40)),
-        (e) => console.log('[PixiRenderer] play() rejected:', src.slice(0, 40), String(e))
-      )
+      el.play().catch(() => {
+        // 自动播放被拦截时静默（Pixi VideoSource 也会尝试 autoplay；此处先发请求保证后续可 seek）
+      })
     }
-    // 必须有实际帧数据（HAVE_CURRENT_DATA, readyState>=2）才返回纹理；
-    // 仅元数据(readyState=1)时尺寸可读但像素未就绪。此处已 play + render 前先 seek，
-    // 故 readyState>=2 即可；再用 tex.valid/尺寸兜底二次校验防 GL_INVALID_OPERATION。
+    // 必须有实际帧数据（HAVE_CURRENT_DATA, readyState>=2）且源有尺寸才返回纹理。
+    // 仅元数据(readyState=1)时 videoWidth 可读但像素未就绪；此处已 play + render 前先 seek，
+    // 故 readyState>=2 即可。就绪判定一律以「像素尺寸 >0」为准（v8 中 Texture 无 `.valid`）。
     if (el.readyState < 2 || !el.videoWidth || !el.videoHeight) {
       if (el.readyState < 2) el.play().catch(() => {})
-      // 诊断：首帧就绪前打印一次（避免刷屏，用记录标志）
-      if (!this._videoDiag.has(src)) {
-        this._videoDiag.add(src)
-        console.log(`[PixiRenderer] video not ready: readyState=${el.readyState} w=${el.videoWidth} h=${el.videoHeight} src=${src}`)
-      }
       return null
     }
     let tex: Texture | null = null
     try {
+      // Texture.from 内部以 video 元素为 key 做全局缓存：若首次调用时源尚未 resize
+      // （metadata 已到但 VideoSource 异步初始化未完成），会缓存一张 width=0 的坏纹理，
+      // 之后永远命中它导致画面不出现。因此先取缓存，发现 width<1 且元素本身已就绪时，
+      // 销毁坏缓存并以 skipCache 强制重建一张新纹理。
       tex = Texture.from(el)
-    } catch (err) {
-      // 诊断盲区：Texture.from 对播放中的 blob 视频可能反复抛错被静默吞掉
-      if (!this._videoDiag.has(src)) {
-        this._videoDiag.add(src)
-        console.error('[PixiRenderer] Texture.from threw:', (err as Error).message, 'src', src.slice(0, 40))
+      if (tex && (tex.width < 1 || tex.height < 1) && el.videoWidth >= 1 && el.videoHeight >= 1) {
+        // 源 resize 事件应已使纹理更新；此处兜底：销毁缓存坏纹理并重建
+        try {
+          if (tex.destroy) tex.destroy()
+        } catch {
+          /* 忽略销毁异常 */
+        }
+        tex = Texture.from(el, true) // skipCache：绕过坏缓存重建
       }
+    } catch (err) {
+      console.error('[PixiRenderer] Texture.from threw:', (err as Error).message, 'src', src.slice(0, 40))
       return null
     }
-    // 二次校验：纹理未有效（尺寸 0 / 未 upload）则放弃本帧，等待下一帧自动重试
-    if (!tex.valid || tex.width < 1 || tex.height < 1) {
-      if (!this._videoDiag.has(src)) {
-        this._videoDiag.add(src)
-        console.log(`[PixiRenderer] texture invalid: valid=${tex.valid} w=${tex.width} h=${tex.height} src=${src}`)
-      }
+    // 二次校验：纹理尚无像素尺寸则放弃本帧，等待下一帧（源 resize 后就绪）自动重试
+    if (!tex || tex.width < 1 || tex.height < 1) {
       return null
     }
     return tex
