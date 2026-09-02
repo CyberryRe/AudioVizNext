@@ -362,12 +362,17 @@ export class PixiRenderer {
     let el = this.videoEls.get(src)
     if (!el) {
       el = document.createElement('video')
+      // crossOrigin 必须在设 src 之前设置。avn-file:// 是自定义协议，须以 CORS 模式(anonymous)
+      // 加载才不会被 WebGL 判为"跨源污染"（否则 texImage2D 抛 SecurityError 视频无法上屏）。
+      // 主进程 avn-file 处理器已返回 Access-Control-Allow-Origin: *，与 anonymous 配合即解污染。
+      // blob:/data: 同源无需但无害；仅对 http(s) 远程源不设（避免无 CORS 头的演示媒体加载失败）。
+      const isRemote = /^https?:\/\//i.test(src)
+      if (!isRemote) el.crossOrigin = 'anonymous'
       el.src = src
       el.muted = true
       el.loop = true
       el.preload = 'auto'
       el.playsInline = true
-      // 注意：不加 crossOrigin——avn-file:// 是自定义协议，CORS 模式反而会让视频加载失败
       el.addEventListener('error', () => {
         console.error('[PixiRenderer] video error:', src, el.error?.code, el.error?.message)
       })

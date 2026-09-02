@@ -116,7 +116,9 @@ app.whenReady().then(() => {
             'Content-Type': mime,
             'Content-Length': String(safeEnd - safeStart + 1),
             'Content-Range': `bytes ${safeStart}-${safeEnd}/${size}`,
-            'Accept-Ranges': 'bytes'
+            'Accept-Ranges': 'bytes',
+            // CORS：让渲染层 <video>/<img> 以 crossOrigin=anonymous 加载时不污染画布（WebGL 才能 texImage2D）
+            'Access-Control-Allow-Origin': '*'
           }
         })
       }
@@ -126,7 +128,9 @@ app.whenReady().then(() => {
         headers: {
           'Content-Type': mime,
           'Content-Length': String(size),
-          'Accept-Ranges': 'bytes'
+          'Accept-Ranges': 'bytes',
+          // CORS：让渲染层 <video>/<img> 以 crossOrigin=anonymous 加载时不污染画布（WebGL 才能 texImage2D）
+          'Access-Control-Allow-Origin': '*'
         }
       })
     } catch (e) {
