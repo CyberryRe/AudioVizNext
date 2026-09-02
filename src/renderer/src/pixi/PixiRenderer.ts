@@ -16,7 +16,7 @@ import { Application, Container, Sprite, Text, Assets, Texture, BlurFilter } fro
 // 它覆盖渲染器的 _unsafeEvalCheck 并用避免 eval 的 polyfill 替代（Electron/Chrome 扩展等严格 CSP 环境）
 import 'pixi.js/unsafe-eval'
 import type { Project } from '../model/timeline'
-import { resolveTimeline, parseLrc, lrcIndexAt, lrcGlide, mixColor } from '../model/timeline'
+import { resolveTimeline, parseLrc, lrcIndexAt, lrcGlide, mixColor, designScreenPx } from '../model/timeline'
 import type { ActiveVideoClip, ActiveImageClip, ActiveTextClip, LyricStyle } from '../model/timeline'
 import { effectiveVideoSrc, initMediaProxy } from './mediaProxy'
 
@@ -109,7 +109,14 @@ export class PixiRenderer {
       height: STAGE.height,
       backgroundAlpha: 0, // 透明，让外层 DOM 背景/暗角透出
       antialias: true,
-      autoDensity: true,
+      // 关键：不要 autoDensity。autoDensity=true 时 Pixi 每次 resize 都会把 canvas 的 CSS 宽高设成
+      // "stage 像素 px"（CanvasSource.resizeCanvas: style.width/height = stage.width/height px），
+      // 覆盖掉我们设的 width/height:100%，导致 canvas 以真实像素尺寸钉在遮罩宿主左上角：
+      //   - 画布比遮罩宿主大 → 遮罩 overflow:hidden 裁掉画布右/下 → "底部+右侧不显示画面"(21:9 必现)；
+      //   - 切分辨率 stage px 变 → canvas CSS 尺寸变 → 宿主(随窗口)不变 → 内容被"被动强制缩放"而漂移。
+      // autoDensity=false → Pixi 只改 canvas 像素(backing=stage*resolution)，CSS 尺寸始终 100% 铺满遮罩宿主，
+      // 且遮罩宿主宽高比==stage 宽高比(都=序列比例)，画布正好无黑边铺满、整幅 stage 可见 → 内容不再漂移/被裁。
+      autoDensity: false,
       resolution: Math.min(window.devicePixelRatio || 1, 2)
     })
     this.root = new Container()
@@ -202,7 +209,7 @@ export class PixiRenderer {
     cancelAnimationFrame(this._raf)
   }
 
-  /** 适配：canvas 尺寸跟随画幅真实分辨率；外部用 CSS objectFit 缩放显示 */
+  /** 适配：canvas 逻辑尺寸跟随画幅(stage)。CSS 尺寸恒为 100% 铺满遮罩宿主（autoDensity=false 保证不被覆盖） */
   setStage(w: number, h: number): void {
     if (!this.app) return
     this.app.renderer.resize(w, h)
@@ -249,6 +256,10 @@ export class PixiRenderer {
           this.sprites.set(l.id, sp)
           this.root.addChild(sp)
         }
+        // 关键：渲染层级必须由 zIndex(=轨道序)决定，而非创建/复活顺序。Pixi v8 中 root 不 sortableChildren 时
+        // 子节点按 addChild 顺序绘制——若某 clip 在拖拽/移动时被 retire 销毁(暂时不活跃)后又复活重建，会被 addChild
+        // 追加到最末 → "最后操作的对象压到最顶"(用户报的 BUG)。设 zIndex 会标记父容器 sortDirty；同值则 no-op 无开销。
+        sp.zIndex = l.z
         // 视频帧同步：把视频元素当作时间轴的"奴隶"，跟随目标源秒（帧→秒映射见 syncVideo 注释），
         // 绝不让它脱离时间轴自行循环播放。
         if (isVideo) this.syncVideo(src, l.sourceFrame, fps)
@@ -277,15 +288,25 @@ export class PixiRenderer {
               ` src=${l.src.slice(0, 40)}`
             )
           }
-          // 视频/图片适配画幅：contain（完整显示，不被遮罩裁剪），缩放补满画幅
+          // 视频/图片适配（语义 = 你的相机比喻，B 方案"缩放只随窗口/缩放，与比例解耦"）：
+          // 媒体**固定铺满画框高度**（media 高 = 画框高，即屏上恒为"适合"遮罩等高 H0），宽按源自身宽高比自然得出，
+          // 只水平居中。这样：
+          //   - 切比例(改宽高比)时媒体**不缩放**，仅"哪一段水平内容落在画框内"变化 → 窄画框=裁左右，宽画框=露更多源/或黑边；
+          //   - 永不因 stage 重铺而把内容二次放大（根治 16:9↔9:16 乱飞/被放大）。
+          // 不做 cover(max) 是因为它会把媒体重新铺满每个新形状 → 内容被二次缩放而跳变。
+          // 说明：若源比画框窄(如 16:9 源进 21:9 超宽框)左右会有黑边——你已确认可接受。
           const sw = sp.texture.width, sh = sp.texture.height
-          const scale = Math.max(project.stage.width / sw, project.stage.height / sh)
           const sx = (l.transform?.scaleX ?? 1)
           const sy = (l.transform?.scaleY ?? 1)
+          // 铺满画框高 → 高不变、宽随源比例；保证高向永无黑边(不裁高)
+          const scaleH = project.stage.height / sh
+          const mediaW = sw * scaleH
+          const mediaH = project.stage.height
+          // 中心 + 画框内偏移(x/y 为画框宽/高的比例，-0.5..0.5) → stage px
           const dx = (l.transform?.x ?? 0) * project.stage.width
           const dy = (l.transform?.y ?? 0) * project.stage.height
-          sp.width = sw * scale * sx
-          sp.height = sh * scale * sy
+          sp.width = mediaW * sx
+          sp.height = mediaH * sy
           sp.anchor.set(0.5)
           sp.position.set(project.stage.width / 2 + dx, project.stage.height / 2 + dy)
           sp.alpha = l.opacity
@@ -305,6 +326,8 @@ export class PixiRenderer {
           this.textLayers.set(l.id, tl)
           this.root.addChild(root)
         }
+        // 同媒体层：文本层层级也按 zIndex(=轨道序)而非创建顺序(修复复活后被压到最顶的 BUG)
+        tl.root.zIndex = l.z
         tl.isLyric = l.isLyric
         this.applyText(tl, l, project, fps)
         // 移除残留精灵
@@ -314,6 +337,10 @@ export class PixiRenderer {
 
     // 回收不再活跃的层
     this.retire(liveIds)
+
+    // 按 zIndex 显式重排(有 zIndex 变化才真正排序)：层级=轨道序，杜绝"复活重建后压到最顶"
+    this.root.sortableChildren = true
+    this.root.sortChildren()
 
     this.app.render()
   }
@@ -491,14 +518,24 @@ export class PixiRenderer {
    */
   private applyText(tl: TextLayer, l: Layer, project: Project, fps: number): void {
     const s = l.lyrics
-    const baseFontSize = (s?.fontSize ?? 48) * (s?.scale ?? 1)
+    // 分辨率无关归一化（与 DOM 端一致，见 Monitor.tsx / designScreenPx 注释）：
+    // 内容字号以「冻结的设计基准 design.height」排版；当前画布是 stage 像素空间、又经 CSS contain 缩放显示，
+    // 故把 authored 设计 px 换算成 stage 像素 px = authoredPx * (stage.height / design.height)。
+    // 分母用冻结 design.height 而非可变 stage —— 否则同比例切分辨率(720→1080→4K)时 stage 变大、
+    // CSS 等比缩放变小，两者相抵本应恒定，但若直接以 stage px 写死字号会让屏幕上文字被二次缩放而乱飞。
+    const designH = project.design?.height || project.stage.height
+    const designW = project.design?.width || project.stage.width
+    const designScale = project.stage.height / designH
+    const authoredBase = (s?.fontSize ?? 48) * (s?.scale ?? 1)
+    const baseFontSize = designScreenPx(authoredBase, designH, project.stage.height)
     const align = s?.align ?? 'center'
     const glowOn = s?.glowEnabled ?? true
     const glowColor = s?.glowColor ?? '#00e5ff'
     const mainColor = s?.color ?? '#ffffff'
-    // 位置：画幅中心 + 偏移
-    const lx = (s?.x ?? 0) * project.stage.width
-    const ly = (s?.y ?? 0) * project.stage.height
+    // 位置：design 画框中心 + 偏移（x/y 为 design 宽/高的比例，-0.5..0.5），
+    // 再整体按 designScale 落到 stage 画布中心 —— 与媒体层同一映射，切比例时文本/媒体保持同一组合、只被窗口裁。
+    const lx = (s?.x ?? 0) * designW * designScale
+    const ly = (s?.y ?? 0) * designH * designScale
     tl.root.position.set(project.stage.width / 2 + lx, project.stage.height / 2 + ly)
     tl.root.alpha = l.opacity
     tl.root.rotation = ((s?.rotateZ ?? 0) * Math.PI) / 180
@@ -624,7 +661,11 @@ export class PixiRenderer {
     t.style.fontWeight = d.weight
     t.style.lineHeight = (lineHeight ?? 1.4) * d.size
     t.style.wordWrap = true
-    t.style.wordWrapWidth = project.stage.width * 0.9
+    // 换行宽度按「设计画框宽」在 stage 空间的等值 = design.width * (stage.height / design.height) * 0.9
+    // （同比例时恰等于 stage.width*0.9，向后兼容；改比例后仍按完整设计框换行，而非被裁的窄窗）
+    const dH = project.design?.height || project.stage.height
+    const dW = project.design?.width || project.stage.width
+    t.style.wordWrapWidth = dW * (project.stage.height / dH) * 0.9
     t.style.align = align
     // 对齐锚点：左=左缘，右=右缘，中=中心
     t.anchor.set(align === 'left' ? 0 : align === 'right' ? 1 : 0.5, 0.5)
