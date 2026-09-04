@@ -12,7 +12,8 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:model": "node --experimental-strip-types test/model.test.mjs",
-    "test": "npm run test:model"
+    "test:h264": "node --experimental-strip-types test/esUtils.test.mjs && node --experimental-strip-types test/decodeProvider.test.mjs && node --experimental-strip-types test/decodeSources.test.mjs",
+    "test": "npm run test:model && npm run test:h264"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

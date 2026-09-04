@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { StageRatio } from '../model/timeline'
+import PreferencesDialog from './PreferencesDialog'
 
 interface StageConfig {
   ratioId: string
@@ -13,18 +14,21 @@ interface MenuBarProps {
   onSetStage: (next: StageConfig) => void
   ratios: StageRatio[]
   stageSizeFor: (ratio: number, mainLength: number, orientation?: 'landscape' | 'portrait') => { width: number; height: number }
+  /** 点「文件>导出」触发（由 App 承接完整导出流程） */
+  onExport?: () => void
 }
 
 /** 只保留 文件 / 序列 / 帮助 三个菜单 */
-const FILES = ['新建项目', '打开项目…', '保存', '另存为…', '—', '导入', '导出', '—', '退出']
+const FILES = ['新建项目', '打开项目…', '保存', '另存为…', '—', '导入', '导出', '—', '首选项…', '退出']
 const HELPS = ['关于 AudioVizNext', '文档']
 
 /** 标准分辨率预设（主边长度） */
 const MAIN_LENGTHS = [720, 1080, 1440, 1920, 2160, 3840]
 
-export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor }: MenuBarProps): React.JSX.Element {
+export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor, onExport }: MenuBarProps): React.JSX.Element {
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const [seqOpen, setSeqOpen] = useState(false)
+  const [prefsOpen, setPrefsOpen] = useState(false)
 
   const closeAll = (): void => { setOpenMenu(null); setSeqOpen(false) }
 
@@ -79,6 +83,10 @@ export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor 
           {FILES.map((it, j) =>
             it === '—' ? (
               <div key={j} style={{ height: 1, background: '#3a3a3a', margin: '5px 10px' }} />
+            ) : it === '导出' ? (
+              <MenuItem key={j} label={it} onClick={() => { closeAll(); onExport?.() }} />
+            ) : it === '首选项…' ? (
+              <MenuItem key={j} label={it} onClick={() => { closeAll(); setPrefsOpen(true) }} />
             ) : (
               <MenuItem key={j} label={it} onClick={closeAll} />
             )
@@ -206,6 +214,9 @@ export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor 
           </span>
         ))}
       </span>
+
+      {/* 首选项对话框（文件 → 首选项…） */}
+      {prefsOpen && <PreferencesDialog onClose={() => setPrefsOpen(false)} />}
     </div>
   )
 }

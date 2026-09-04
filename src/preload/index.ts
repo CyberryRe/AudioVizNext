@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { EnsureResult } from '../main/mediaCache'
+import type { AudioClipInput, ExportResult, ExportVideoParams } from '../main/export'
+import type { DecodeMediaMeta } from '../main/decodeMedia'
+import type { Preferences } from '../main/preferences'
+import type { ExportDeviceOption, GpuInfo } from '../main/deviceProbe'
 
 /**
  * 通过 contextBridge 暴露给渲染进程的安全 API。
@@ -42,6 +46,35 @@ const api = {
    */
   readFileBytes: (filePath: string): Promise<Uint8Array> =>
     ipcRenderer.invoke('avs:readFileBytes', filePath) as Promise<Uint8Array>,
+  /** 导出：弹保存对话框返回用户选择的 .mp4 路径（取消返回 null） */
+  exportSaveDialog: (): Promise<string | null> => ipcRenderer.invoke('avs:exportSaveDialog'),
+  /** 导出：是否有可用 ffmpeg */
+  exportHasFfmpeg: (): Promise<boolean> => ipcRenderer.invoke('avs:exportHasFfmpeg'),
+  /** 导出：开始会话（spawn 视频编码器；返回所选编码器） */
+  exportBegin: (p: ExportVideoParams): Promise<{ ok: boolean; error?: string; encoder?: string }> =>
+    ipcRenderer.invoke('avs:exportBegin', p),
+  /** 导出：逐帧送一帧 NV12（当前会话 pixelInput:'nv12' 时 ffmpeg rawvideo 直读）；旧 PNG 会话兼容同一通道 */
+  exportFrame: (png: Uint8Array): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('avs:exportFrame', png),
+  /** 导出：结束会话并合成（含音频计划） */
+  exportEnd: (audio: AudioClipInput[]): Promise<ExportResult> => ipcRenderer.invoke('avs:exportEnd', audio),
+  /** 导出(annexb)：开始复用会话（WebCodecs 裸流 → ffmpeg -c:v copy） */
+  exportMuxBegin: (p: ExportVideoParams): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('avs:exportMuxBegin', p),
+  /** 导出(annexb)：送一块 H.264 Annex-B 裸流 */
+  exportMuxChunk: (bytes: Uint8Array): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('avs:exportMuxChunk', bytes),
+  /** 导出(annexb)：结束复用会话并混音频合成 */
+  exportMuxEnd: (audio: AudioClipInput[]): Promise<ExportResult> => ipcRenderer.invoke('avs:exportMuxEnd', audio),
+  /** 首选项：读取 */
+  getPreferences: (): Promise<Preferences> => ipcRenderer.invoke('avs:prefGet'),
+  /** 首选项：保存（导出设备等，重启生效） */
+  setPreferences: (p: Preferences): Promise<Preferences> => ipcRenderer.invoke('avs:prefSet', p),
+  /** 探查可用导出设备（GPU 列表 + 硬件编码器可用性） */
+  probeExportDevices: (): Promise<{ options: ExportDeviceOption[]; gpus: GpuInfo[] }> =>
+    ipcRenderer.invoke('avs:exportDevices'),
+  /** WebCodecs 预解码：请求把源视频轨拆成 H.264 Annex-B 临时 ES */
+  decodeDemux: (srcPath: string): Promise<{ ok: boolean; es: DecodeMediaMeta | null }> =>
+    ipcRenderer.invoke('avs:decodeMedia', 'demux', srcPath),
   mediaCache
 }
 

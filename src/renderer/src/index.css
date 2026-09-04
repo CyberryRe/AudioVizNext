@@ -4,6 +4,21 @@
   box-sizing: border-box;
 }
 
+/* 整个桌面工具 UI 默认不可选中（否则按住左键拖动时间轴/clip/面板会误选中文本，很难看）。
+   input/textarea 仍需可选中可编辑，单独放开。 */
+html,
+body,
+#root {
+  user-select: none;
+  -webkit-user-select: none;
+}
+input,
+textarea,
+[contenteditable='true'] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 :root {
   /* 背景层级 */
   --bg-app: #181818;

@@ -6,6 +6,7 @@
  */
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import type { Project, MediaAsset, Clip, Track, TrackZone } from './model/timeline'
+import { contentTotalFrames, runExport, type ExportProgress } from './export/runExport'
 import {
   createDemoProject,
   createDemoAssets,
@@ -62,6 +63,16 @@ function zoneForAsset(kind: MediaAsset['kind']): TrackZone {
   return kind === 'audio' ? 'audio' : 'video'
 }
 
+/** 把秒格式化为 "mm:ss" / "hh:mm:ss"（导出进度 ETA 用）。 */
+function fmtEta(sec: number): string {
+  const s = Math.max(0, Math.round(sec))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const ss = s % 60
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`
+}
+
 /**
  * 探测媒体文件真实时长（秒）。用 <video>/<audio> 加载 blob 读取 duration。
  * 失败或超时返回 0（调用方回退为模板默认时长）。
@@ -113,6 +124,11 @@ export default function App(): React.JSX.Element {
 
   // ===== 素材库（可变，可拖入） =====
   const [assets, setAssets] = useState<MediaAsset[]>(() => createDemoAssets())
+
+  // ===== 导出状态（导出中进度 / 完成提示 / 错误） =====
+  const [exportInfo, setExportInfo] = useState<
+    { busy: boolean; progress: ExportProgress | null; message: string | null; error: string | null; outPath?: string } | null
+  >(null)
 
   // ===== UI 瞬态（Ring 2） =====
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
@@ -329,6 +345,39 @@ export default function App(): React.JSX.Element {
     })
   }, [])
 
+  // ===== 操作：导出影片（Pixi 离屏逐帧 → ffmpeg 合成 .mp4） =====
+  const handleExport = useCallback(async () => {
+    if (exportInfo?.busy) return
+    if (contentTotalFrames(project) < 1) {
+      setExportInfo({ busy: false, progress: null, message: null, error: '时间轴没有可导出的内容' })
+      return
+    }
+    if (typeof window.api?.exportSaveDialog !== 'function') {
+      setExportInfo({ busy: false, progress: null, message: null, error: '导出不可用（缺少宿主 API）' })
+      return
+    }
+    const outPath = await window.api.exportSaveDialog()
+    if (!outPath) return // 用户取消
+
+    setExportInfo({ busy: true, progress: null, message: `开始导出到 ${outPath}`, error: null, outPath })
+    const res = await runExport({
+      project,
+      outPath,
+      onProgress: (p) => setExportInfo((s) => (s ? { ...s, busy: true, progress: p } : s))
+    })
+    if (res.ok) {
+      setExportInfo({
+        busy: false,
+        progress: null,
+        message: `导出完成：${res.outPath}（${(res.durationSec ?? 0).toFixed(1)}s，${res.frames ?? 0} 帧）`,
+        error: null,
+        outPath: res.outPath
+      })
+    } else {
+      setExportInfo({ busy: false, progress: null, message: null, error: res.error || '导出失败' })
+    }
+  }, [project, exportInfo])
+
   // ===== 操作：给 clip 绑定素材（关联素材） =====
   const handleBindAssetToClip = useCallback((clipId: string, assetId: string) => {
     const asset = assets.find((a) => a.id === assetId)
@@ -407,6 +456,7 @@ export default function App(): React.JSX.Element {
         onSetStage={handleSetStage}
         ratios={STAGE_RATIOS}
         stageSizeFor={stageSizeFor}
+        onExport={handleExport}
       />
 
       <div className="main">
@@ -482,6 +532,81 @@ export default function App(): React.JSX.Element {
           <PropertiesPanel project={project} selectedClipId={selectedClipId} />
         </section>
       </div>
+
+      {/* 导出进度 / 结果浮层 */}
+      {exportInfo && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,.55)', fontFamily: 'inherit'
+          }}
+          onMouseDown={(e) => { if (!exportInfo.busy) e.stopPropagation() }}
+        >
+          <div style={{ width: 420, background: '#1f1f1f', border: '1px solid #333', borderRadius: 6, padding: 18, boxShadow: '0 10px 30px rgba(0,0,0,.6)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: '#eee' }}>
+                {exportInfo.busy ? '正在导出…' : exportInfo.error ? '导出失败' : '导出完成'}
+              </span>
+              {!exportInfo.busy && (
+                <span
+                  style={{ cursor: 'pointer', color: '#999', fontSize: 14, padding: '0 4px' }}
+                  onClick={() => setExportInfo(null)}
+                  title="关闭"
+                >
+                  ✕
+                </span>
+              )}
+            </div>
+
+            {exportInfo.busy && exportInfo.progress && (
+              <div style={{ margin: '14px 0 4px' }}>
+                <div style={{ height: 6, background: '#333', borderRadius: 3, overflow: 'hidden' }}>
+                  <div
+                    style={{
+                      height: '100%', width: `${Math.round(exportInfo.progress.ratio * 100)}%`,
+                      background: '#19a8ff', transition: 'width .1s linear'
+                    }}
+                  />
+                </div>
+                <div style={{ marginTop: 6, fontSize: 11, color: '#aaa' }}>
+                  正在渲染 {exportInfo.progress.frames} / {exportInfo.progress.totalFrames} 帧
+                  {exportInfo.progress.fps > 0 && (
+                    <span style={{ marginLeft: 10, color: '#19a8ff' }}>
+                      {exportInfo.progress.fps.toFixed(1)} fps
+                    </span>
+                  )}
+                  {Number.isFinite(exportInfo.progress.etaSec) && exportInfo.progress.etaSec >= 0 && (
+                    <span style={{ marginLeft: 10 }}>
+                      剩余 ≈ {fmtEta(exportInfo.progress.etaSec)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            {exportInfo.busy && !exportInfo.progress && (
+              <div style={{ margin: '14px 0 4px', fontSize: 12, color: '#aaa' }}>{exportInfo.message}</div>
+            )}
+
+            {exportInfo.message && !exportInfo.busy && !exportInfo.error && (
+              <div style={{ margin: '14px 0', fontSize: 12, color: '#b7e6b0', wordBreak: 'break-all', lineHeight: 1.5 }}>{exportInfo.message}</div>
+            )}
+            {exportInfo.error && !exportInfo.busy && (
+              <div style={{ margin: '14px 0', fontSize: 12, color: '#ff9d9d', wordBreak: 'break-all', lineHeight: 1.5 }}>{exportInfo.error}</div>
+            )}
+
+            {!exportInfo.busy && (
+              <div style={{ marginTop: 8, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => setExportInfo(null)}
+                  style={{ background: '#2a2a2a', border: '1px solid #555', color: '#eee', padding: '6px 16px', borderRadius: 4, fontSize: 12, cursor: 'pointer' }}
+                >
+                  关闭
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

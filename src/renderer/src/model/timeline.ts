@@ -114,6 +114,8 @@ export interface LyricStyle {
   fontSize?: number
   /** 缩放大小（整体缩放倍率） */
   scale?: number
+  /** 行高倍数（默认 1.4；仅歌词多行滚动时生效） */
+  lineHeight?: number
   /** 字颜色 */
   color?: string
   /** 辉光开关 */

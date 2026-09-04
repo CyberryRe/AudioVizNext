@@ -1,7 +1,35 @@
-import { app, shell, BrowserWindow, protocol, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, protocol, ipcMain, dialog } from 'electron'
 import { join, extname } from 'path'
 import { createReadStream, statSync, readFileSync } from 'fs'
 import { ensureProxy, mediaCacheDir, hasFfmpeg, probeVideo } from './mediaCache'
+import { demuxSourceToEs } from './decodeMedia'
+import { initFileLog } from './logFile'
+import {
+  beginVideoEncoding,
+  writeVideoFrame,
+  finishExport,
+  hasFfmpegExport,
+  beginAnnexbMux,
+  writeAnnexbChunk,
+  type AudioClipInput,
+  type ExportVideoParams
+} from './export'
+import { loadPreferences, savePreferences, type Preferences } from './preferences'
+import { probeExportDevices } from './deviceProbe'
+
+// GPU 开关：强制 ANGLE 用 D3D11。旧项目实测 use-gl=desktop 会让 Chromium 的 D3D11 视频
+// 编码器不可用（WebCodecs 硬编探测全失败），且 GameViewer 虚拟显示器环境对 GPU 后端尤其敏感。
+app.commandLine.appendSwitch('use-angle', 'd3d11')
+// 导出设备偏好：多 GPU 混合模式（如关闭独显直连）下强制 Chromium 用独显/核显。
+// 这两个开关只能在 GPU 进程启动前设置，故改偏好需重启生效。
+const _startupPrefs = loadPreferences()
+if (_startupPrefs.exportDevice === 'discrete') {
+  app.commandLine.appendSwitch('force-high-performance-gpu')
+  console.log('[prefs] 导出设备=独显 → force-high-performance-gpu')
+} else if (_startupPrefs.exportDevice === 'integrated') {
+  app.commandLine.appendSwitch('force-low-power-gpu')
+  console.log('[prefs] 导出设备=核显 → force-low-power-gpu')
+}
 
 /** 按扩展名返回 MIME 类型（video/audio 必须给对，否则 <video> 可能拒绝播放） */
 function mimeFor(absPath: string): string {
@@ -37,6 +65,11 @@ protocol.registerSchemesAsPrivileged([
   }
 ])
 
+// 尽早初始化文件日志（主进程 console 落盘 + 捕获渲染进程 console/崩溃），
+// 崩溃后到 userData/logs/avnext-*.log 回溯全量现场（含 WebGL CONTEXT_LOST / GPU 崩溃）。
+const fileLog = initFileLog()
+console.log(`[main] userData logs dir 就绪: ${fileLog.file}`)
+
 /** 创建主窗口 */
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -49,6 +82,9 @@ function createWindow(): void {
       sandbox: false
     }
   })
+
+  // 把本窗口渲染进程的 console/崩溃接入文件日志（WebGL 报错/崩溃后回溯）
+  fileLog.attachWindow(mainWindow.webContents)
 
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
@@ -194,6 +230,68 @@ app.whenReady().then(() => {
       console.error('[avs:readFileBytes] failed:', p, (e as Error).message)
       return new Uint8Array(0)
     }
+  })
+
+  // ===== 导出（Pixi 逐帧离屏 → PNG → ffmpeg 编码 + 音频混流） =====
+  // 弹保存对话框让用户选输出 .mp4 路径。
+  ipcMain.handle('avs:exportSaveDialog', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const d = await dialog.showSaveDialog(win!, {
+      title: '导出影片',
+      defaultPath: '未命名导出.mp4',
+      filters: [{ name: 'MP4 视频', extensions: ['mp4'] }]
+    })
+    return d.canceled ? null : (d.filePath ?? null)
+  })
+  // 开始导出会话（spawn 视频编码 ffmpeg；异步探测硬编/软编）
+  ipcMain.handle('avs:exportBegin', async (_e, p: ExportVideoParams | null) => {
+    if (!p) return { ok: false, error: '缺少导出参数' }
+    return beginVideoEncoding(p)
+  })
+  // 逐帧送 PNG（Uint8Array）
+  ipcMain.handle('avs:exportFrame', async (_e, png: unknown) => {
+    const bytes = png instanceof Uint8Array ? png : png instanceof ArrayBuffer ? new Uint8Array(png) : null
+    if (!bytes || bytes.byteLength === 0) return { ok: false, error: '空帧' }
+    return writeVideoFrame(bytes)
+  })
+  // 结束导出（送音频计划，合成最终文件）
+  ipcMain.handle('avs:exportEnd', async (_e, audio: AudioClipInput[] | null) => {
+    return finishExport(Array.isArray(audio) ? audio : [])
+  })
+  ipcMain.handle('avs:exportHasFfmpeg', async () => hasFfmpegExport())
+
+  // ===== 导出（annexb 复用：渲染层 WebCodecs 硬编裸流 → ffmpeg -c:v copy）=====
+  ipcMain.handle('avs:exportMuxBegin', async (_e, p: ExportVideoParams | null) => {
+    if (!p) return { ok: false, error: '缺少导出参数' }
+    return beginAnnexbMux(p)
+  })
+  ipcMain.handle('avs:exportMuxChunk', async (_e, bytes: unknown) => {
+    const b = bytes instanceof Uint8Array ? bytes : bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : null
+    if (!b || b.byteLength === 0) return { ok: false, error: '空块' }
+    return writeAnnexbChunk(b)
+  })
+  ipcMain.handle('avs:exportMuxEnd', async (_e, audio: AudioClipInput[] | null) => {
+    return finishExport(Array.isArray(audio) ? audio : [])
+  })
+
+  // ===== 首选项（导出设备等）=====
+  ipcMain.handle('avs:prefGet', async () => loadPreferences())
+  ipcMain.handle('avs:prefSet', async (_e, p: Preferences | null) => {
+    return savePreferences(p && typeof p === 'object' ? p : { exportDevice: 'auto' })
+  })
+  // 运行时探查可用导出设备（GPU 列表 + 编码器可用性），供首选项页展示
+  ipcMain.handle('avs:exportDevices', async () => probeExportDevices())
+
+  // ===== WebCodecs 预解码：主进程把源视频轨拆成 H.264 Annex-B 临时 ES 供渲染层解码 =====
+  // 返回 { ok, es?: {esPath, esLen, sourceFps, width, height, durationSec} }；
+  // 非 H.264 / 无 ffmpeg / demux 失败 → ok:false（渲染层回退 <video>）。
+  ipcMain.handle('avs:decodeMedia', async (_e, action: string, payload?: unknown) => {
+    if (action === 'demux') {
+      const src = typeof payload === 'string' ? payload : ''
+      const es = await demuxSourceToEs(src)
+      return es ? { ok: true, es } : { ok: false, es: null }
+    }
+    return { ok: false, es: null }
   })
 
   createWindow()
