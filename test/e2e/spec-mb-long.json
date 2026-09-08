@@ -1,0 +1,15 @@
+{
+  "out": "F:\\ExportTest\\e2e-mb-long-210s.mp4",
+  "seconds": 210,
+  "fps": 30,
+  "stage": [1920, 1080],
+  "video": "E:\\steam\\steamapps\\workshop\\content\\431960\\3576890378\\1759118071936.mp4",
+  "audio": "F:\\ExportTest\\流萤_后会无期.mp3",
+  "lrc": "F:\\ExportTest\\后会无期_-_徐良、汪苏泷_-_tx_-_tx_004gZy7l1GYJ1Q_-_128k.lrc",
+  "frameChecks": [
+    { "a": 2, "b": 14.067, "expect": "same", "min": 0.85 },
+    { "a": 2, "b": 8, "expect": "differ", "max": 0.8 },
+    { "a": 120, "b": 132.067, "expect": "same", "min": 0.85 },
+    { "a": 120, "b": 190, "expect": "differ", "max": 0.8 }
+  ]
+}

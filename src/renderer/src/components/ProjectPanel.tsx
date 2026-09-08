@@ -13,13 +13,15 @@ interface ProjectPanelProps {
 const KIND_ICON: Record<MediaAsset['kind'], string> = {
   video: '▶',
   audio: '♪',
-  image: '▧'
+  image: '▧',
+  lyrics: '✎'
 }
 
 const KIND_LABEL: Record<MediaAsset['kind'], string> = {
   video: '视频',
   audio: '音频',
-  image: '图片'
+  image: '图片',
+  lyrics: '歌词'
 }
 
 /** 左下：项目面板 —— 素材库网格（可拖入本地文件 / 拖出到时间轴） */

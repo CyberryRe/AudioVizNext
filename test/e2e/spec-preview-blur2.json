@@ -1,0 +1,14 @@
+{
+  "mode": "preview",
+  "out": "F:\\ExportTest\\preview-blur2\\out.mp4",
+  "seconds": 4,
+  "fps": 30,
+  "stage": [1920, 1080],
+  "benchFrames": 24,
+  "presetsBelowLyrics": true,
+  "video": "F:\\ExportTest\\output_crop_noaudio_10to20.mp4",
+  "lrc": "F:\\ExportTest\\后会无期_-_徐良、汪苏泷_-_tx_-_tx_004gZy7l1GYJ1Q_-_128k.lrc",
+  "presets": [
+    { "id": "gaussian-blur", "seconds": 4, "params": { "strength": 1, "radius": 30 } }
+  ]
+}

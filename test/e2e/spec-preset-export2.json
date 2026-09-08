@@ -1,0 +1,13 @@
+{
+  "out": "F:\\ExportTest\\e2e-presets2-10s.mp4",
+  "seconds": 10,
+  "fps": 30,
+  "stage": [1920, 1080],
+  "audio": "F:\\ExportTest\\流萤_后会无期.mp3",
+  "presets": [
+    { "id": "particle-waveform", "seconds": 10 },
+    { "id": "rounded-rect", "seconds": 10, "image": "F:\\ExportTest\\rect-test.png", "params": { "posX": -0.30, "posY": -0.20, "scaleX": 0.5, "scaleY": 0.5, "radius": 0.14, "border": 0.01, "borderColor": "#ffffff" } },
+    { "id": "circle", "seconds": 10, "image": "F:\\ExportTest\\rect-test.png", "params": { "posX": 0.30, "posY": -0.20, "scaleX": 0.42, "scaleY": 0.42, "borderTexture": "avn-file://F%3A%5CExportTest%5Cborder-test.png", "spin": 0.5 } },
+    { "id": "sticker", "seconds": 10, "image": "F:\\ExportTest\\rect-test.png", "params": { "posX": 0, "posY": 0.28, "scaleX": 0.42, "scaleY": 0.42, "rotation": 22, "shadow": 0.5 } }
+  ]
+}

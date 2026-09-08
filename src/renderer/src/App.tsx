@@ -6,7 +6,10 @@
  */
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import type { Project, MediaAsset, Clip, Track, TrackZone } from './model/timeline'
-import { contentTotalFrames, runExport, type ExportProgress } from './export/runExport'
+import { contentTotalFrames, type ExportProgress } from './export/exportTypes'
+import { runMbExport } from './export/mbExport'
+import { initPresetRegistry, presetCategories } from './presets/registry'
+import type { PresetMeta } from './presets/types'
 import {
   createDemoProject,
   createDemoAssets,
@@ -134,8 +137,18 @@ export default function App(): React.JSX.Element {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
   // 时间轴缩放（px / 帧）
   const [pxPerFrame, setPxPerFrame] = useState(0.6)
+  // 预设样式注册表（内置 presets/** + 用户导入的 .avnpre）
+  const [presets, setPresets] = useState<PresetMeta[]>([])
 
-  const effectCategories = useMemo(() => createEffectCategories(), [])
+  useEffect(() => {
+    void initPresetRegistry().then(setPresets)
+  }, [])
+
+  // 效果面板 = 基础素材模板（视频/音频/歌词/图片）+ 预设样式（presets/**）
+  const effectCategories = useMemo(
+    () => [...createEffectCategories(), ...presetCategories()],
+    [presets]
+  )
 
   // 舞台尺寸随序列设置变化
   const stage = useMemo(() => ({ width: stageConfig.width, height: stageConfig.height }), [stageConfig])
@@ -214,7 +227,8 @@ export default function App(): React.JSX.Element {
       const clip: Clip = {
         id: `clip-${Math.random().toString(36).slice(2, 8)}`,
         trackId: targetTrackId ?? firstTrackIdInZone(project, zone),
-        type: asset.kind,
+        // 歌词素材落到时间轴 → 文本 clip（ClipType 无 'lyrics'，见 model/timeline.ts）
+        type: asset.kind === 'lyrics' ? 'text' : asset.kind,
         name: asset.name,
         startFrame: dropFrame,
         durationFrames: 30 * Math.max(1, Math.round(asset.durationSec || 5)),
@@ -328,9 +342,57 @@ export default function App(): React.JSX.Element {
     })
   }, [])
 
-  // ===== 操作：更新选中 clip 的变换参数（缩放/位置） =====
-  const handleUpdateClipParams = useCallback((clipId: string, patch: Partial<Clip>) => {
+  // ===== 操作：更新预设参数（键 = preset.json 的 params[].key） =====
+  const handleSetPresetParam = useCallback((clipId: string, key: string, value: unknown) => {
     setProject((prev) => {
+      const nextClips: Record<string, Clip[]> = {}
+      let touched = false
+      for (const [tid, clips] of Object.entries(prev.clips)) {
+        nextClips[tid] = clips.map((c) => {
+          if (c.id !== clipId) return c
+          touched = true
+          return { ...c, params: { ...(c.params ?? {}), [key]: value } }
+        })
+      }
+      if (!touched) return prev
+      return { ...prev, clips: nextClips, version: prev.version + 1 }
+    })
+  }, [])
+
+  // ===== 操作：写入预设参数的关键帧轨道 =====
+  const handleSetClipKeyframes = useCallback((clipId: string, key: string, track: import('./presets/keyframes').Keyframe[]) => {
+    setProject((prev) => {
+      const nextClips: Record<string, Clip[]> = {}
+      let touched = false
+      for (const [tid, clips] of Object.entries(prev.clips)) {
+        nextClips[tid] = clips.map((c) => {
+          if (c.id !== clipId) return c
+          touched = true
+          const kf = { ...(c.keyframes ?? {}) }
+          if (track.length === 0) delete kf[key]
+          else kf[key] = track
+          return { ...c, keyframes: Object.keys(kf).length ? kf : undefined }
+        })
+      }
+      if (!touched) return prev
+      return { ...prev, clips: nextClips, version: prev.version + 1 }
+    })
+  }, [])
+
+  // ===== 操作：导入预设包（.avnpre） =====
+  const handleImportPreset = useCallback(async () => {
+    if (typeof window.api?.presetImport !== 'function') return
+    const res = await window.api.presetImport()
+    if (!res.ok) {
+      if (res.error && res.error !== '已取消') window.alert(`导入预设失败：${res.error}`)
+      return
+    }
+    setPresets(await initPresetRegistry())
+    window.alert(`已导入预设：${res.meta?.name ?? ''}`)
+  }, [])
+
+  // ===== 操作：更新选中 clip 的变换参数（缩放/位置） =====
+  const handleUpdateClipParams = useCallback((clipId: string, patch: Partial<Clip>) => {    setProject((prev) => {
       const nextClips: Record<string, Clip[]> = {}
       let touched = false
       for (const [tid, clips] of Object.entries(prev.clips)) {
@@ -345,7 +407,7 @@ export default function App(): React.JSX.Element {
     })
   }, [])
 
-  // ===== 操作：导出影片（Pixi 离屏逐帧 → ffmpeg 合成 .mp4） =====
+  // ===== 操作：导出影片（Worker + mediabunny 逐帧 → MP4 直接落盘） =====
   const handleExport = useCallback(async () => {
     if (exportInfo?.busy) return
     if (contentTotalFrames(project) < 1) {
@@ -360,7 +422,7 @@ export default function App(): React.JSX.Element {
     if (!outPath) return // 用户取消
 
     setExportInfo({ busy: true, progress: null, message: `开始导出到 ${outPath}`, error: null, outPath })
-    const res = await runExport({
+    const res = await runMbExport({
       project,
       outPath,
       onProgress: (p) => setExportInfo((s) => (s ? { ...s, busy: true, progress: p } : s))
@@ -457,6 +519,7 @@ export default function App(): React.JSX.Element {
         ratios={STAGE_RATIOS}
         stageSizeFor={stageSizeFor}
         onExport={handleExport}
+        onImportPreset={() => { void handleImportPreset() }}
       />
 
       <div className="main">
@@ -467,6 +530,9 @@ export default function App(): React.JSX.Element {
             project={project}
             getAsset={getAsset}
             onUpdateClipParams={handleUpdateClipParams}
+            onSetPresetParam={handleSetPresetParam}
+            onSetClipKeyframes={handleSetClipKeyframes}
+            playheadFrame={playheadFrame}
             onBindAssetToClip={handleBindAssetToClip}
           />
         </section>

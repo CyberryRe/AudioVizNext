@@ -1,21 +1,13 @@
 import { app, shell, BrowserWindow, protocol, ipcMain, dialog } from 'electron'
 import { join, extname } from 'path'
-import { createReadStream, statSync, readFileSync } from 'fs'
+import { createReadStream, statSync, readFileSync, openSync, closeSync, writeSync, writeFileSync } from 'fs'
 import { ensureProxy, mediaCacheDir, hasFfmpeg, probeVideo } from './mediaCache'
-import { demuxSourceToEs } from './decodeMedia'
 import { initFileLog } from './logFile'
-import {
-  beginVideoEncoding,
-  writeVideoFrame,
-  finishExport,
-  hasFfmpegExport,
-  beginAnnexbMux,
-  writeAnnexbChunk,
-  type AudioClipInput,
-  type ExportVideoParams
-} from './export'
+import { verifyVideoIntegrity, compareFrames } from './export'
 import { loadPreferences, savePreferences, type Preferences } from './preferences'
-import { probeExportDevices } from './deviceProbe'
+import { probeExportDevices, getGpuEnv } from './deviceProbe'
+import { applyWindowsGpuPreference } from './gpuPreference'
+import { listUserPresets, importAvnpreFile, inspectAvnpreFile } from './presets'
 
 // GPU 开关：强制 ANGLE 用 D3D11。旧项目实测 use-gl=desktop 会让 Chromium 的 D3D11 视频
 // 编码器不可用（WebCodecs 硬编探测全失败），且 GameViewer 虚拟显示器环境对 GPU 后端尤其敏感。
@@ -70,6 +62,9 @@ protocol.registerSchemesAsPrivileged([
 const fileLog = initFileLog()
 console.log(`[main] userData logs dir 就绪: ${fileLog.file}`)
 
+/** mediabunny 导出：输出路径 → 已打开的文件描述符（StreamTarget 按偏移随机写盘） */
+const mbFds = new Map<string, number>()
+
 /** 创建主窗口 */
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -79,7 +74,10 @@ function createWindow(): void {
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: false,
+      // 关键：导出/长任务期间窗口失焦或被遮挡时，Chromium 默认会把定时器/rAF 重度节流
+      // （失焦 1s/次、隐藏 5 分钟后更甚）→ 导出直接掉到 ~1fps 甚至 0.4fps。必须关闭。
+      backgroundThrottling: false
     }
   })
 
@@ -123,6 +121,24 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // GPU 特性诊断（视频编解码是否被虚拟显示适配器弄失效，供排查 WebCodecs 硬编不可用）
+  try {
+    const gfs = app.getGPUFeatureStatus()
+    console.log(`[gpu] video_encode=${gfs.video_encode} video_decode=${gfs.video_decode} webgl=${gfs.webgl} gpu_compositing=${gfs.gpu_compositing}`)
+  } catch { /* 忽略 */ }
+  // E2E 模式下再晚点打一次：whenReady 时 GPU 进程往往还没初始化完，首报会是 disabled_software。
+  if (process.env['AVS_E2E_SPEC']) {
+    setTimeout(() => {
+      try {
+        const gfs = app.getGPUFeatureStatus()
+        console.log(`[gpu:late] video_encode=${gfs.video_encode} video_decode=${gfs.video_decode} webgl=${gfs.webgl} gpu_compositing=${gfs.gpu_compositing} 2d_canvas=${gfs['2d_canvas']}`)
+        void app.getGPUInfo('basic').then((i) => console.log('[gpu:info] ' + JSON.stringify(i))).catch(() => {})
+      } catch { /* 忽略 */ }
+    }, 2500)
+  }
+  // 启动时同步一次 Windows 每应用 GPU 偏好（保证注册表与偏好文件一致，供 DXGI 在进程启动时读取）
+  void applyWindowsGpuPreference(loadPreferences().exportDevice)
+
   // 注册 avn-file:// 处理器：avn-file://<encodeURIComponent(绝对路径)> → 流式返回本地文件
   // 约定：绝对路径整体做 URI 编码放在 host 位，跨平台（Windows C:\ 与 Unix / 均无歧义）。
   // 用 fs.createReadStream 直接流式返回（不用 net.fetch(file://)——Electron 的 net.fetch
@@ -232,8 +248,7 @@ app.whenReady().then(() => {
     }
   })
 
-  // ===== 导出（Pixi 逐帧离屏 → PNG → ffmpeg 编码 + 音频混流） =====
-  // 弹保存对话框让用户选输出 .mp4 路径。
+  // ===== 导出：保存对话框（真正的导出在渲染层 Worker 里由 mediabunny 完成） =====
   ipcMain.handle('avs:exportSaveDialog', async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     const d = await dialog.showSaveDialog(win!, {
@@ -243,55 +258,119 @@ app.whenReady().then(() => {
     })
     return d.canceled ? null : (d.filePath ?? null)
   })
-  // 开始导出会话（spawn 视频编码 ffmpeg；异步探测硬编/软编）
-  ipcMain.handle('avs:exportBegin', async (_e, p: ExportVideoParams | null) => {
-    if (!p) return { ok: false, error: '缺少导出参数' }
-    return beginVideoEncoding(p)
-  })
-  // 逐帧送 PNG（Uint8Array）
-  ipcMain.handle('avs:exportFrame', async (_e, png: unknown) => {
-    const bytes = png instanceof Uint8Array ? png : png instanceof ArrayBuffer ? new Uint8Array(png) : null
-    if (!bytes || bytes.byteLength === 0) return { ok: false, error: '空帧' }
-    return writeVideoFrame(bytes)
-  })
-  // 结束导出（送音频计划，合成最终文件）
-  ipcMain.handle('avs:exportEnd', async (_e, audio: AudioClipInput[] | null) => {
-    return finishExport(Array.isArray(audio) ? audio : [])
-  })
-  ipcMain.handle('avs:exportHasFfmpeg', async () => hasFfmpegExport())
-
-  // ===== 导出（annexb 复用：渲染层 WebCodecs 硬编裸流 → ffmpeg -c:v copy）=====
-  ipcMain.handle('avs:exportMuxBegin', async (_e, p: ExportVideoParams | null) => {
-    if (!p) return { ok: false, error: '缺少导出参数' }
-    return beginAnnexbMux(p)
-  })
-  ipcMain.handle('avs:exportMuxChunk', async (_e, bytes: unknown) => {
-    const b = bytes instanceof Uint8Array ? bytes : bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : null
-    if (!b || b.byteLength === 0) return { ok: false, error: '空块' }
-    return writeAnnexbChunk(b)
-  })
-  ipcMain.handle('avs:exportMuxEnd', async (_e, audio: AudioClipInput[] | null) => {
-    return finishExport(Array.isArray(audio) ? audio : [])
-  })
 
   // ===== 首选项（导出设备等）=====
   ipcMain.handle('avs:prefGet', async () => loadPreferences())
   ipcMain.handle('avs:prefSet', async (_e, p: Preferences | null) => {
-    return savePreferences(p && typeof p === 'object' ? p : { exportDevice: 'auto' })
+    const saved = savePreferences(p && typeof p === 'object' ? p : { exportDevice: 'auto' })
+    // 联动 Windows 每应用 GPU 偏好（写入 UserGpuPreferences 注册表；重启生效）
+    void applyWindowsGpuPreference(saved.exportDevice)
+    return saved
   })
   // 运行时探查可用导出设备（GPU 列表 + 编码器可用性），供首选项页展示
   ipcMain.handle('avs:exportDevices', async () => probeExportDevices())
+  // GPU 环境（厂商白名单过滤后的真实 GPU + 被忽略的虚拟适配器）
+  ipcMain.handle('avs:gpuEnv', async () => getGpuEnv())
 
-  // ===== WebCodecs 预解码：主进程把源视频轨拆成 H.264 Annex-B 临时 ES 供渲染层解码 =====
-  // 返回 { ok, es?: {esPath, esLen, sourceFps, width, height, durationSec} }；
-  // 非 H.264 / 无 ffmpeg / demux 失败 → ok:false（渲染层回退 <video>）。
-  ipcMain.handle('avs:decodeMedia', async (_e, action: string, payload?: unknown) => {
-    if (action === 'demux') {
-      const src = typeof payload === 'string' ? payload : ''
-      const es = await demuxSourceToEs(src)
-      return es ? { ok: true, es } : { ok: false, es: null }
+  // ===== mediabunny 导出落盘：StreamTarget 按 {position,data} 分块随机写 =====
+  // mediabunny 在渲染进程内完成 编码+MP4 复用，主进程只负责按偏移写盘（不把整片攒在内存）。
+  ipcMain.handle('avs:mbBegin', async (_e, outPath: unknown) => {
+    const p = typeof outPath === 'string' ? outPath : ''
+    if (!p) return false
+    try {
+      if (mbFds.has(p)) { try { closeSync(mbFds.get(p)!) } catch { /* 忽略 */ } }
+      mbFds.set(p, openSync(p, 'w')) // 'w' 截断已有文件
+      return true
+    } catch (e) {
+      console.error('[mbExport] 无法创建输出文件:', p, (e as Error).message)
+      return false
     }
-    return { ok: false, es: null }
+  })
+  ipcMain.handle('avs:mbWrite', async (_e, outPath: unknown, data: unknown, position: unknown) => {
+    const p = typeof outPath === 'string' ? outPath : ''
+    const fd = mbFds.get(p)
+    const bytes = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : null
+    if (fd === undefined || !bytes) return false
+    try {
+      // 随机写（position 为输出文件绝对偏移）——mp4 的 moov 在末尾，必须能回头写
+      let written = 0
+      const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      while (written < buf.byteLength) {
+        written += writeSync(fd, buf, written, buf.byteLength - written, Number(position) + written)
+      }
+      return true
+    } catch (e) {
+      console.error('[mbExport] 写盘失败:', (e as Error).message)
+      return false
+    }
+  })
+  ipcMain.handle('avs:mbEnd', async (_e, outPath: unknown) => {
+    const p = typeof outPath === 'string' ? outPath : ''
+    const fd = mbFds.get(p)
+    if (fd !== undefined) { try { closeSync(fd) } catch { /* 忽略 */ } mbFds.delete(p) }
+    return true
+  })
+
+  // ===== 预设包（.avnpre）导入 / 用户预设列表 =====
+  // 内置预设在打包时随渲染层 bundle 一起进入应用；这里只管"用户导入"的预设，
+  // 落到 userData/presets/<id>/（preset.json + assets/），下次启动自动加载。
+  ipcMain.handle('avs:presetList', async () => listUserPresets())
+  ipcMain.handle('avs:presetImport', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const d = await dialog.showOpenDialog(win!, {
+      title: '导入预设包',
+      filters: [{ name: 'AudioVizNext 预设包', extensions: ['avnpre'] }],
+      properties: ['openFile']
+    })
+    if (d.canceled || !d.filePaths[0]) return { ok: false, error: '已取消' }
+    const file = d.filePaths[0]
+    // 先只解码：含可执行脚本的预设必须用户明确确认后才安装
+    const info = inspectAvnpreFile(file)
+    if (!info.ok) return { ok: false, error: info.error }
+    if (info.impl === 'script') {
+      const r = await dialog.showMessageBox(win!, {
+        type: 'warning',
+        buttons: ['取消', '仍然导入'],
+        defaultId: 0,
+        cancelId: 0,
+        title: '该预设包含可执行脚本',
+        message: `「${info.name ?? info.id}」携带脚本实现（约 ${Math.round((info.scriptChars ?? 0) / 1024)}KB）`,
+        detail: '脚本将以本应用权限在渲染进程中运行（同 VS Code 扩展的信任模型）。\n只导入你信任来源的预设。'
+      })
+      if (r.response !== 1) return { ok: false, error: '已取消（含脚本的预设需确认）' }
+    }
+    return importAvnpreFile(file)
+  })
+
+  // ===== E2E 测试台：渲染层跑完导出把报告打回 stdout，然后退出 =====
+  // 仅当设了 AVS_E2E_SPEC 时会被渲染层调用（见 preload e2eSpec / renderer export/e2eRunner.ts）。
+  ipcMain.handle('avs:e2e:verify', async (_e, outPath: unknown) =>
+    verifyVideoIntegrity(typeof outPath === 'string' ? outPath : '')
+  )
+  // 两个时间点的画面相似度（SSIM）——验证时间轴映射（循环/定格类 bug）
+  ipcMain.handle('avs:e2e:compare', async (_e, outPath: unknown, t1: unknown, t2: unknown) =>
+    compareFrames(typeof outPath === 'string' ? outPath : '', Number(t1), Number(t2))
+  )
+  // E2E：把渲染层画布（PNG base64）落盘，用于预览截图目视验证
+  ipcMain.handle('avs:e2e:savePng', async (_e, filePath: unknown, base64: unknown) => {
+    const p = typeof filePath === 'string' ? filePath : ''
+    const b64 = typeof base64 === 'string' ? base64.replace(/^data:image\/\w+;base64,/, '') : ''
+    if (!p || !b64) return false
+    try {
+      writeFileSync(p, Buffer.from(b64, 'base64'))
+      console.log('[e2e] 预览截图已保存:', p)
+      return true
+    } catch (e) {
+      console.error('[e2e] 截图保存失败:', (e as Error).message)
+      return false
+    }
+  })
+  ipcMain.handle('avs:e2e:report', async (_e, payload: unknown) => {
+    console.log('E2E_RESULT_BEGIN')
+    console.log(JSON.stringify(payload, null, 2))
+    console.log('E2E_RESULT_END')
+    setTimeout(() => app.quit(), 200)
+    return true
   })
 
   createWindow()

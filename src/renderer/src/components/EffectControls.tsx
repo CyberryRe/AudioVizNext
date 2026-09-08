@@ -1,11 +1,20 @@
 import { useRef, useState } from 'react'
 import type { Project, Clip, MediaAsset } from '../model/timeline'
+import MediaSlot from './MediaSlot'
+import PresetParamsPanel from './PresetParamsPanel'
+import { getPreset } from '../presets/registry'
 
 interface EffectControlsProps {
   selectedClipId: string | null
   project: Project
   getAsset: (id: string) => MediaAsset | undefined
   onUpdateClipParams: (clipId: string, patch: Partial<Clip>) => void
+  /** 更新预设参数（键 = preset.json 的 params[].key） */
+  onSetPresetParam: (clipId: string, key: string, value: unknown) => void
+  /** 写入预设参数的关键帧轨道（整轨替换） */
+  onSetClipKeyframes: (clipId: string, key: string, track: import('../presets/keyframes').Keyframe[]) => void
+  /** 当前播放头帧（关键帧打点/求值用） */
+  playheadFrame: number
   onBindAssetToClip: (clipId: string, assetId: string) => void
 }
 
@@ -69,67 +78,9 @@ function NumberSlider({ label, value, min, max, step, onChange }: {
   )
 }
 
-/** 素材拖入槽（关联素材） */
-function MediaSlot({ clip, getAsset, onBind }: {
-  clip: Clip
-  getAsset: (id: string) => MediaAsset | undefined
-  onBind: (assetId: string) => void
-}): React.JSX.Element {
-  const [over, setOver] = useState(false)
-  const bound = clip.assetId ? getAsset(clip.assetId) : undefined
-  const boundName = bound?.name ?? clip.name
-
-  const handleDrop = (e: React.DragEvent): void => {
-    e.preventDefault()
-    e.stopPropagation()
-    setOver(false)
-    // 读取素材 id
-    try {
-      const raw = e.dataTransfer.getData('application/x-avn-asset')
-      if (raw) {
-        const p = JSON.parse(raw)
-        if (p.assetId) { onBind(p.assetId); return }
-      }
-    } catch { /* ignore */ }
-    const stash = (window as unknown as Record<string, unknown>)._avsPendingDrag as { type: 'asset'; assetId: string } | undefined
-    if (stash?.type === 'asset') { onBind(stash.assetId) }
-  }
-
-  return (
-    <div
-      onDragOver={(e) => { e.preventDefault(); setOver(true) }}
-      onDragLeave={() => setOver(false)}
-      onDrop={handleDrop}
-      style={{
-        border: `1px dashed ${over ? '#19a8ff' : '#555'}`,
-        borderRadius: 4,
-        padding: '12px 10px',
-        textAlign: 'center',
-        color: over ? '#19a8ff' : '#aaa',
-        fontSize: 12,
-        background: over ? 'rgba(25,168,255,.08)' : 'transparent',
-        cursor: 'pointer',
-        transition: 'border-color .15s, color .15s'
-      }}
-      title="从素材库拖入媒体素材以快速填充"
-    >
-      {bound ? (
-        <>
-          <div style={{ color: '#eee', marginBottom: 3 }}>{boundName}</div>
-          <div style={{ fontSize: 11, color: '#777' }}>{bound.kind} · 已绑定</div>
-        </>
-      ) : (
-        <>
-          <div style={{ marginBottom: 3 }}>＋ 拖入媒体素材</div>
-          <div style={{ fontSize: 11, color: '#777' }}>从左侧素材库拖入</div>
-        </>
-      )}
-    </div>
-  )
-}
 
 /** 左上：效果控件 —— 视频循环 clip 的参数面板（关联素材 / 缩放 / 位置） */
-export default function EffectControls({ selectedClipId, project, getAsset, onUpdateClipParams, onBindAssetToClip }: EffectControlsProps): React.JSX.Element {
+export default function EffectControls({ selectedClipId, project, getAsset, onUpdateClipParams, onSetPresetParam, onSetClipKeyframes, playheadFrame, onBindAssetToClip }: EffectControlsProps): React.JSX.Element {
   // 查找选中的 clip
   let selectedClip: Clip | null = null
   let selectedClipName: string | null = null
@@ -146,6 +97,8 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
   const isSinglePlay = !!selectedClip && selectedClip.type === 'audio' && !!selectedClip.clampToSource
   // 是否为歌词类 clip（滚动歌词等）
   const isLyrics = !!selectedClip && selectedClip.type === 'text' && !!selectedClip.isLyrics
+  // 预设样式 clip（可视化 / 图片样式）：参数面板由 preset.json 的 schema 自动生成
+  const presetMeta = getPreset(selectedClip?.presetId)
   const t = selectedClip?.transform
   // XY 关联（缩放联动）
   const [linkXY, setLinkXY] = useState(false)
@@ -186,11 +139,21 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-faint)' }}>
             在时间轴中选择剪辑以查看效果控件
           </div>
+        ) : presetMeta ? (
+          <PresetParamsPanel
+            clip={selectedClip}
+            meta={presetMeta}
+            getAsset={getAsset}
+            frame={playheadFrame}
+            onSetParam={(key, value) => selectedClipId && onSetPresetParam(selectedClipId, key, value)}
+            onSetKeyframes={(key, track) => selectedClipId && onSetClipKeyframes(selectedClipId, key, track)}
+            onBindAsset={(assetId) => selectedClipId && onBindAssetToClip(selectedClipId, assetId)}
+          />
         ) : isVideoLoop ? (
           <div>
             {/* 关联素材 */}
             <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>关联素材</div>
-            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => onBindAssetToClip(selectedClipId, id)} />
+            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => selectedClipId && onBindAssetToClip(selectedClipId, id)} />
             <div style={{ fontSize: 11, color: '#888', margin: '6px 0 16px' }}>从素材库拖动媒体素材到上方槽位即可快速填充。</div>
 
             {/* 缩放 */}
@@ -220,7 +183,7 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
           <div>
             {/* 关联音乐（唯一可编辑内容） */}
             <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>关联的音乐</div>
-            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => onBindAssetToClip(selectedClipId, id)} />
+            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => selectedClipId && onBindAssetToClip(selectedClipId, id)} />
             <div style={{ fontSize: 11, color: '#888', margin: '6px 0 8px' }}>从素材库拖动音频素材到上方槽位即可填充。</div>
             <div style={{ fontSize: 11, color: '#888' }}>
               单次播放音频：拖拽 Clip 尾部调整时长，最多到关联歌曲的完整时长为止。
@@ -230,7 +193,7 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
           <div>
             {/* 1. 关联素材（LRC 歌词） */}
             <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>关联素材</div>
-            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => onBindAssetToClip(selectedClipId, id)} />
+            <MediaSlot clip={selectedClip} getAsset={getAsset} onBind={(id) => selectedClipId && onBindAssetToClip(selectedClipId, id)} />
             <div style={{ fontSize: 11, color: '#888', margin: '6px 0 16px' }}>从素材库拖入 LRC 歌词文本，随播放滚动高亮当前句。</div>
 
             {/* 2. 字体 */}

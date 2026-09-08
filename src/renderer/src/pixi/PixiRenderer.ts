@@ -11,16 +11,20 @@
  * 说明：Mask（输出画幅）与音频发声不属于 Pixi 视觉层，
  *  Mask 由外层 DOM 叠线框/暗角，音频由 <audio> 元素发声。
  */
-import { Application, Container, Sprite, Text, Assets, Texture, ImageSource, BlurFilter, Rectangle } from 'pixi.js'
+import { Application, Container, Sprite, Text, Assets, Texture, ImageSource, BlurFilter, Rectangle, RenderTexture, ColorMatrixFilter, type TextStyleFontWeight } from 'pixi.js'
 // CSP 不允许 unsafe-eval 时，需引入 unsafe-eval 模块做 side-effect：
 // 它覆盖渲染器的 _unsafeEvalCheck 并用避免 eval 的 polyfill 替代（Electron/Chrome 扩展等严格 CSP 环境）
 import 'pixi.js/unsafe-eval'
 import type { Project } from '../model/timeline'
 import { resolveTimeline } from '../model/timeline'
-import type { ActiveVideoClip, ActiveImageClip, ActiveTextClip, LyricStyle } from '../model/timeline'
+import type { ActiveVideoClip, ActiveImageClip, ActiveTextClip, ActiveVisualClip, ActiveEffectClip, LyricStyle } from '../model/timeline'
 import { effectiveVideoSrc, initMediaProxy } from './mediaProxy'
 import { mediaBox, resolveTextRows, glowRadius, type TextRowDatum } from './layout'
-import type { DecodeSourceManager } from './h264/decodeSources'
+import { getPreset, drawPreset } from '../presets/registry'
+import { paramAt } from '../presets/keyframes'
+import { num as numParam } from '../presets/types'
+import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
+import type { PresetImage, PresetMeta } from '../presets/types'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
 interface Layer {
@@ -33,6 +37,12 @@ interface Layer {
   transform?: { x?: number; y?: number; scaleX?: number; scaleY?: number }
   content: string
   lyrics?: LyricStyle
+  /** 预设样式 id + 参数（有值时由预设 drawer 绘制，见 presets/registry） */
+  presetId?: string
+  params?: Record<string, unknown>
+  /** 关键帧轨道与 clip 内相对进度（调整层/预设求值用） */
+  keyframes?: import('../presets/keyframes').KeyframeTracks
+  tRel?: number
 }
 
 const STAGE = { width: 1920, height: 1080 }
@@ -77,34 +87,20 @@ export class PixiRenderer {
   private imageLoading = new Map<string, Promise<unknown>>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
   private _videoShown = new Set<string>()
+  /** 音频分析数据（可视化预设用；由 Monitor 计算后 setAudioData 传入） */
+  private _audioData: PresetAudioData | null = null
+  /** 调整层（高斯模糊）的 GPU 合成资源：下层内容的 RenderTexture + 模糊精灵 */
+  private _adjustRT: RenderTexture | null = null
+  private _adjustSprite: Sprite | null = null
+  private _adjustFilter: BlurFilter | null = null
+  private _adjustColor: ColorMatrixFilter | null = null
+  /** 预设层离屏画布缓存：同一 clip 复用一张画布 + 纹理，仅在内容 key 变化时重绘 */
+  private _presetRenders = new Map<string, { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; tex: Texture; key: string }>()
   // initMediaProxy 返回的退订函数（销毁时调用）
   private _proxyUnsub: (() => void) | null = null
   // 当前是否已挂载 canvas
   private mounted = false
 
-  // —— WebCodecs 预解码加速（导出期，可加性，见 attachDecode/detachDecode）——
-  // 解码会话管理器：附着后，渲染视频层时若某源 provider 已就绪且目标 AU 缓存命中，
-  // 就用 ImageBitmap 纹理直接上屏，跳过 <video> 每帧 seek（根治 decode 空闲/encode 收尾才飙）。
-  // 任一帧 miss/未就绪 → 自动回退既有 <video> 兜底，绝不影响导出正确性。
-  private _decode: DecodeSourceManager | null = null
-  // clip id → 当前已用解码纹理（避免每帧重建 GPU 纹理；同 AU 复用）
-  private _decodeTex = new Map<string, { au: number; tex: Texture }>()
-  // 解码命中/未命中计数（导出用，打印进 [Export-perf] 判断解码路径是否真正接管）
-  private _decodeHits = 0
-  private _decodeMisses = 0
-  // 解码未接管的原因去重打印（诊断 0/0 用）
-  private _dbgSeen = new Set<string>()
-  private _dbgOnce(reason: string): void {
-    if (this._dbgSeen.has(reason)) return
-    this._dbgSeen.add(reason)
-    console.warn(`[Export-decode] 未接管原因: ${reason}`)
-  }
-  // 导出期"放弃 <video>"的源集合：某源的 <video> 已被强制退役过（卡死/无法解码），
-  // 本导出后续不再为它重建 <video>（否则每帧退役→重建→再卡死=GPU 空转/风扇狂转/主线程卡死）。
-  private _videoGiveUp = new Set<string>()
-  // 导出模式：为 true 时 captureFrame 会先 await 各解码视频帧的目标 AU 就绪（有界），
-  // 而非一 miss 就回退 <video>——让主线程"等"预取管线，而不是拖慢 <video> seek。仅离屏导出设。
-  private _awaitDecode = false
   // WebGL context lost（GPU 进程崩溃/驱动重置）标记：置 true 后 captureFrame 应立即中止而非
   // 阻塞在死 GL 上（GPU process exit → 同步 readPixels/extract 会让主线程卡死、"鼠标拖不动"）。
   private _contextLost = false
@@ -277,51 +273,6 @@ export class PixiRenderer {
     this.app.renderer.resize(w, h)
   }
 
-  /**
-   * 附着 WebCodecs 预解码管理器（导出期加速用）。附着后视频层渲染优先查解码缓存。
-   * @param mgr 由 DecodeSourceManager.prepare() 建好的会话管理器（可 null 关闭）
-   * @param mapSrcToPath 供内部把 layer.src(effective) → 绝对路径注册进管理器；缺省用 manager 已注册映射
-   */
-  attachDecode(mgr: DecodeSourceManager | null, mapSrcToPath?: (src: string) => string | null): void {
-    this._decode = mgr
-    this._decodeSrcToPath = mapSrcToPath ?? null
-  }
-
-  /** 导出专用：captureFrame 每帧先 await 各解码视频帧就绪（有界），miss 不再即刻回退 <video>。 */
-  setAwaitDecode(flag: boolean): void {
-    this._awaitDecode = flag
-  }
-
-  /** 导出用：本实例解码命中/未命中统计（打印进 [Export-perf]）。 */
-  decodeStats(): { hits: number; misses: number } {
-    return { hits: this._decodeHits, misses: this._decodeMisses }
-  }
-
-  /** WebGL context 是否已丢失（GPU 进程崩溃/驱动重置）。导出据此中止，避免主线程卡死。 */
-  isContextLost(): boolean {
-    return this._contextLost
-  }
-
-  /** 解除预解码附着并清理本实例持有的解码纹理（不销毁 provider，由管理器 dispose 负责） */
-  detachDecode(): void {
-    this._clearDecodeTextures()
-    this._decode = null
-    this._decodeSrcToPath = null
-  }
-
-  /** 手动按 src 注册路径映射（若未提供 mapSrcToPath 时用） */
-  registerDecodeSrc(src: string, path: string | null): void {
-    if (this._decode && path) this._decode.registerSrc(src, path)
-  }
-
-  // 每层的 effective src → 绝对路径（decodeSources 反查 provider）
-  private _decodeSrcToPath: ((src: string) => string | null) | null = null
-  private _clearDecodeTextures(): void {
-    for (const { tex } of this._decodeTex.values()) {
-      try { tex.destroy() } catch { /* 忽略 */ }
-    }
-    this._decodeTex.clear()
-  }
 
   /**
    * 渲染一帧：解析时间轴 → 增量更新精灵/文本。
@@ -344,6 +295,8 @@ export class PixiRenderer {
     const layers: Layer[] = [
       ...scene.videos.map((v) => this.toLayer(v, clipMap)),
       ...scene.images.map((i) => this.toLayer(i, clipMap)),
+      ...scene.visuals.map((v) => this.toLayer(v, clipMap)),
+      ...scene.effects.map((e) => this.toLayer(e, clipMap)),
       ...scene.texts.map((t) => this.toLayer(t, clipMap))
     ].filter((l): l is Layer => !!l)
     layers.sort((a, b) => a.z - b.z)
@@ -353,6 +306,39 @@ export class PixiRenderer {
 
     for (const l of layers) {
       liveIds.add(l.id)
+
+      // —— 预设样式层（可视化/图片样式）：用与导出完全相同的 drawer 画到离屏 canvas，再作为纹理上屏 ——
+      const presetMeta = getPreset(l.presetId)
+      // —— 调整层（如高斯模糊）：作用于其下已合成画面，预览端用 RenderTexture + BlurFilter 实现 ——
+      if (presetMeta?.adjust) {
+        this.applyAdjustLayer(l, presetMeta, layers, frame, project, fps)
+        this.releaseText(l.id, liveIds)
+        continue
+      }
+      if (presetMeta) {
+        let sp = this.sprites.get(l.id)
+        if (!sp) {
+          sp = new Sprite()
+          this.sprites.set(l.id, sp)
+          this.root.addChild(sp)
+        }
+        sp.zIndex = l.z
+        const tex = this.renderPresetToTexture(l, presetMeta, frame, project, fps)
+        if (tex) {
+          if (sp.texture !== tex) sp.texture = tex
+          sp.anchor.set(0, 0)
+          sp.position.set(0, 0)
+          sp.width = project.stage.width
+          sp.height = project.stage.height
+          sp.alpha = l.opacity
+          sp.visible = true
+        } else {
+          sp.visible = false
+        }
+        this.releaseText(l.id, liveIds)
+        continue
+      }
+
       if (l.src) {
         // 媒体层（视频/图片）。视频源可被媒体代理换成转码代理(avn 本地文件)；图片原样走 Assets。
         const isImage = looksLikeImage(l.src)
@@ -371,23 +357,17 @@ export class PixiRenderer {
         // 子节点按 addChild 顺序绘制——若某 clip 在拖拽/移动时被 retire 销毁(暂时不活跃)后又复活重建，会被 addChild
         // 追加到最末 → "最后操作的对象压到最顶"(用户报的 BUG)。设 zIndex 会标记父容器 sortDirty；同值则 no-op 无开销。
         sp.zIndex = l.z
-        // —— WebCodecs 预解码视频纹理（可加性）——
-        // 若本层源有就绪的 provider 且当前 AU 缓存命中，用 ImageBitmap 纹理上屏并跳过 <video> seek。
-        // 返回 true = 本帧已由解码路径处理（sp.texture 已被设为解码纹理）。
-        const decodeHandled = isVideo && this._tryDecodeVideo(l, src, proxyEff, sp, fps)
         // 视频帧同步：把视频元素当作时间轴的"奴隶"，跟随目标源秒（帧→秒映射见 syncVideo 注释），
-        // 绝不让它脱离时间轴自行循环播放。（解码已处理时跳过——不需要 <video> seek。）
-        // 非解码兜底用 proxyEff(代理比原始更稳，Chromium 原生解码更可靠)。
-        if (isVideo && !decodeHandled) this.syncVideo(proxyEff, l.sourceFrame, fps)
-        const tex = decodeHandled ? sp.texture : this.textureFor(proxyEff)
+        // 绝不让它脱离时间轴自行循环播放。用 proxyEff(代理比原始更稳，Chromium 原生解码更可靠)。
+        if (isVideo) this.syncVideo(proxyEff, l.sourceFrame, fps)
+        const tex = this.textureFor(proxyEff)
         if (tex && sp.texture !== tex) sp.texture = tex
         // 就绪判定只认像素尺寸（v8 中 Texture 没有 `.valid` 属性；source resize 后 width/height 即真实像素数）
         const tReady = sp.texture && sp.texture.width >= 1 && sp.texture.height >= 1
         if (tReady) {
           // 视频纹理强制刷新到当前源帧：Pixi v8 对 video 纹理，暂停/seek 后不会自动拉新帧，
           // 必须 update() 才能把 video.currentTime 对应的帧上传到 GPU（否则拖动进度条画面不更新）。
-          // 解码路径的 ImageBitmap 纹理是"每新 AU 重建"，无需 update（纹理即当前帧）。
-          if (isVideo && !decodeHandled) {
+          if (isVideo) {
             try {
               sp.texture.update()
             } catch (err) {
@@ -396,7 +376,7 @@ export class PixiRenderer {
             }
           }
           // 诊断：视频纹理首帧就绪时打印一次关键状态（用于定位黑屏）
-          if (isVideo && !decodeHandled && !this._videoShown.has(l.id)) {
+          if (isVideo && !this._videoShown.has(l.id)) {
             this._videoShown.add(l.id)
             const vel = this.videoEls.get(l.src)
             console.log(
@@ -449,156 +429,8 @@ export class PixiRenderer {
     this.app.render()
   }
 
-  /**
-   * 确定性导出一帧：渲染到 stage 画布并取出像素 canvas。
-   * 与实时预览不同，导出不允许墙钟播放——每帧都让视频"奴隶"精确 seek 到目标源秒(暂停态)，
-   * 等待其 seeked 完成、纹理像素就绪后再 render+extract，得到的正是"预览停在 frame 那一刻"的画面。
-   *
-   * 逐帧重试直到无异步媒体工作(seeking/加载中)；随后再补一次纹理 update + render，
-   * 确保视频新帧确实上传到 GPU，再通过 renderer.extract 把整幅 stage 拷成 canvas 返回。
-   *
-   * 注意：仅用于离屏/隐藏实例(export)，勿与实时预览的 rAF 循环(start)并发调用同一实例。
-   */
-  async captureFrame(frame: number, project: Project, fps: number): Promise<Uint8ClampedArray | null> {
-    if (!this.app || !this.root) return null
-    if (this._contextLost) {
-      throw new Error('WebGL context lost：GPU 进程已崩溃/驱动重置，导出中止（请关闭远程操控或改用 AVS_GPU_SOFT=1 软渲染）')
-    }
-    this._latestFrame = frame
-    this._latestProject = project
-    this._latestFps = fps
-    this._playing = false // 导出永远"暂停态"：视频只钉帧、不自由前进
-
-    const waitMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
-    // —— 导出分阶段计时（仅导出模式累加；[Export-cap] 定位 3fps 卡在哪）——
-    let tDecode0 = 0 // 阶段零：await 解码就绪
-    let tWait1 = 0   // 阶段一：_hasAsyncWork 空转
-    let tWait2 = 0   // 阶段二：残余空转
-    let tExtract = 0 // extract.canvas 抽帧（GPU 回读）
-    let tRender1 = 0 // 阶段一里 render() 本身耗时（区别于空转等待）
-
-    // 阶段零（仅导出 _awaitDecode 模式）：先推进各解码会话播头到本帧目标 AU 并 await 其就绪（有界）。
-    // 这样随后的 render 会命中解码缓存、走 ImageBitmap 快路径，而不是 miss 后回退 <video> seek。
-    // 解码器 async 输出在 await 间隙持续超前喂帧 → 逐帧间 decode 保持 busy，encode 不再饿着。
-    if (this._awaitDecode) {
-      const s = performance.now()
-      const targets = this._decodeTargetsFor(frame, project, fps)
-      if (targets.size > 0) {
-        const waits: Promise<void>[] = []
-        for (const { session, au } of targets.values()) {
-          const prov = session.provider
-          prov.setPlayhead(au) // 声明需求并触发超前 feed
-          waits.push(
-            prov
-              .awaitUntil(au, 1500)
-              .then((ok) => { if (!ok) prov.setPlayhead(au) })
-              .catch(() => {})
-          )
-        }
-        await Promise.all(waits)
-      }
-      tDecode0 = performance.now() - s
-    }
-
-    // 阶段一：渲染 + 等待所有媒体(视频 seek/解码、图片加载)就绪
-    const s1 = performance.now()
-    let wait1N = 0
-    for (let i = 0; i < 300; i++) {
-      const r0 = performance.now()
-      this.render(frame, project, fps)
-      tRender1 += performance.now() - r0
-      if (!this._hasAsyncWork()) break
-      await waitMs(10)
-      wait1N++
-      // 导出模式：卡死(seek/播放)超 15 次(150ms)的 <video> 兜底强制退役，别让单帧空转拖到秒级
-      if (i >= 15) this._forceQuietStuckInExport(15, wait1N)
-    }
-    tWait1 = performance.now() - s1
-    // 阶段一空转过多（_hasAsyncWork 恒 true）→ 打印是哪个 video/图片拖住——3fps 卡帧定位
-    if (this._awaitDecode && wait1N >= 8) {
-      const stuck = Array.from(this.videoEls.entries())
-        .filter(([, el]) => (el.readyState < 2) || el.seeking || !el.paused)
-        .map(([src, el]) => `${src.slice(-30)}(rs=${el.readyState},seek=${el.seeking},paused=${el.paused})`)
-      if (stuck.length) console.warn(`[Export-cap] 阶段一空转 ${wait1N} 次、videoEls=${this.videoEls.size}，卡住的 video:`, stuck.join(' | '))
-      else if (this.imageLoading.size) console.warn(`[Export-cap] 阶段一空转 ${wait1N} 次、仍在加载图片=${this.imageLoading.size}`)
-    }
-
-    // 阶段二：视频纹理再补一次 update + render，确保 seek 后的实际帧像素已上传到 GPU
-    const s2 = performance.now()
-    for (const el of this.videoEls.values()) {
-      try {
-        const t = Texture.from(el)
-        if (t) t.update()
-      } catch {
-        /* 忽略单源纹理更新异常 */
-      }
-    }
-    // 若仍有异步未决，继续让出若干帧，让视频解码完成
-    for (let i = 0; i < 30; i++) {
-      this.render(frame, project, fps)
-      if (!this._hasAsyncWork()) break
-      await waitMs(10)
-      // 导出模式：卡死 video 超 12 次(120ms)也强制退役
-      if (this._awaitDecode && i >= 12) this._forceQuietStuckInExport(12, i + 1)
-    }
-    tWait2 = performance.now() - s2
-    this.render(frame, project, fps)
-
-    // 取出整幅 stage 画布（= 遮罩窗口看到的那一帧；超出 stage 的内容自然被裁掉）。
-    // 用 extract.pixels + clearColor 黑底直接取回 RGBA 字节，省掉"canvas → drawImage → getImageData"的二次拷贝。
-    let pixels: Uint8ClampedArray | null = null
-    try {
-      const sX = performance.now()
-      const extract = (this.app.renderer as unknown as {
-        extract?: {
-          pixels: (o: { target: Container; frame: Rectangle; clearColor: string }) => { pixels: Uint8ClampedArray; width: number; height: number }
-        }
-      }).extract
-      if (extract) {
-        // 显式 frame 强制按 stage 全尺寸抽取（否则 Pixi 按 root 的 localBounds 抽，非 16:9 素材/
-        // 空帧会得到错误尺寸）；clearColor 黑底把透明区合成到不透明黑，直接得到可喂 NV12 的 RGBA。
-        const out = extract.pixels({
-          target: this.root,
-          frame: new Rectangle(0, 0, project.stage.width, project.stage.height),
-          clearColor: '#000000'
-        })
-        pixels = out.pixels
-      } else {
-        // 退化：读 WebGL canvas 并在 2D 画布上合成黑底取回 RGBA（旧路径）
-        const c = (this.app.canvas as HTMLCanvasElement) || null
-        if (c) {
-          const tmp = document.createElement('canvas')
-          tmp.width = c.width
-          tmp.height = c.height
-          const ctx = tmp.getContext('2d', { willReadFrequently: true })
-          if (ctx) {
-            ctx.fillStyle = '#000000'
-            ctx.fillRect(0, 0, tmp.width, tmp.height)
-            ctx.drawImage(c, 0, 0)
-            pixels = ctx.getImageData(0, 0, tmp.width, tmp.height).data
-          }
-        }
-      }
-      tExtract = performance.now() - sX
-    } catch (err) {
-      console.error('[PixiRenderer] captureFrame extract failed:', (err as Error).message)
-      pixels = null
-    }
-
-    // 导出模式累计分阶段耗时（供 [Export-perf] 判定 3fps 卡点）
-    if (this._awaitDecode && frame >= 0 && (frame % 60) === 0) {
-      const ds = this.decodeStats()
-      console.log(
-        `[Export-cap] frame=${frame} 解码await=${tDecode0.toFixed(0)}ms ` +
-        `渲染=${tRender1.toFixed(0)}ms(其中空转${Math.max(0, tWait1 - tRender1).toFixed(0)}ms) ` +
-        `阶段二=${tWait2.toFixed(0)}ms extract=${tExtract.toFixed(0)}ms ` +
-        `videoEls=${this.videoEls.size} 解码命中累计=${ds.hits} miss累计=${ds.misses}`
-      )
-    }
-    return pixels
-  }
   private toLayer(
-    c: ActiveVideoClip | ActiveImageClip | ActiveTextClip,
+    c: ActiveVideoClip | ActiveImageClip | ActiveTextClip | ActiveVisualClip | ActiveEffectClip,
     clipMap: Map<string, import('../model/timeline').Clip>
   ): Layer | null {
     if (c.type === 'text') {
@@ -612,18 +444,195 @@ export class PixiRenderer {
         sourceFrame: c.sourceFrame,
         content: c.content,
         transform: undefined,
-        lyrics: raw?.lyrics
+        lyrics: raw?.lyrics,
+        presetId: c.presetId,
+        params: c.params,
+        keyframes: c.keyframes,
+        tRel: c.tRel
+      }
+    }
+    if (c.type === 'visual' || c.type === 'effect') {
+      return {
+        id: c.id, isLyric: false, z: c.zIndex, src: '', opacity: c.opacity,
+        sourceFrame: c.sourceFrame, transform: c.transform, content: '',
+        presetId: c.presetId, params: c.params, keyframes: c.keyframes, tRel: c.tRel
       }
     }
     return {
       id: c.id, isLyric: false, z: c.zIndex, src: c.src, opacity: c.opacity,
-      sourceFrame: c.sourceFrame, transform: c.transform, content: ''
+      sourceFrame: c.sourceFrame, transform: c.transform, content: '',
+      presetId: c.presetId, params: c.params, keyframes: c.keyframes, tRel: c.tRel
     }
   }
 
+  /** 音频分析数据（可视化预设的驱动信号；由 Monitor 计算后传入） */
+  setAudioData(data: PresetAudioData | null): void {
+    this._audioData = data
+  }
+
+  /**
+   * 抓取当前画面（PNG dataURL）——供 E2E 预览截图/调试用。
+   * ⚠ 不能直接用 `canvas.toDataURL()`：WebGL 默认不保留绘制缓冲，合成后内容已被清空（会得到空白图）。
+   * 走 Pixi 的 `extract.canvas()`（内部 readPixels）才是可靠回读。
+   */
+  captureDataUrl(): string | null {
+    try {
+      if (!this.app || !this.root) return null
+      const extracted = this.app.renderer.extract.canvas(this.root) as unknown as { toDataURL?: (t?: string) => string }
+      if (typeof extracted?.toDataURL === 'function') return extracted.toDataURL('image/png')
+      return null
+    } catch (e) {
+      console.warn('[PixiRenderer] 截图失败:', (e as Error)?.message)
+      return null
+    }
+  }
+
+  /**
+   * 调整层（adjust）合成：把"本层之下"的内容渲染到 RenderTexture，再用带 BlurFilter 的精灵
+   * 按"强度"叠回（sharp·(1-s) + blurred·s）——与导出端 `gaussianBlur` drawer 的语义一致。
+   *
+   * 参数通过内置关键帧 API `paramAt()` 求值（与 drawer 同一份逻辑）。
+   */
+  private applyAdjustLayer(
+    l: Layer,
+    meta: PresetMeta,
+    layers: Layer[],
+    frame: number,
+    project: Project,
+    fps: number
+  ): void {
+    if (!this.app) return
+    const w = project.stage.width
+    const h = project.stage.height
+    const tRel = l.tRel ?? 0
+    const radius = paramAt(l.params, l.keyframes, 'radius', tRel, 24)
+    const strength = paramAt(l.params, l.keyframes, 'strength', tRel, 1)
+    const darken = numParam(l.params ?? {}, meta, 'darken')
+    const saturation = numParam(l.params ?? {}, meta, 'saturation')
+    const active = strength > 0.002 && (radius > 0.3 || darken > 0.001 || saturation > 0.001)
+
+    if (!active) {
+      if (this._adjustSprite) this._adjustSprite.visible = false
+      return
+    }
+
+    // 资源惰性创建（尺寸随 stage 变化重建）
+    if (!this._adjustRT || this._adjustRT.width !== w || this._adjustRT.height !== h) {
+      this._adjustSprite?.destroy()
+      this._adjustRT?.destroy(true)
+      this._adjustRT = RenderTexture.create({ width: w, height: h })
+      this._adjustFilter = new BlurFilter({ strength: 8, quality: 4 })
+      this._adjustColor = new ColorMatrixFilter()
+      this._adjustSprite = new Sprite(this._adjustRT)
+      this._adjustSprite.anchor.set(0, 0)
+      this.root!.addChild(this._adjustSprite)
+    }
+    const sprite = this._adjustSprite!
+    const rt = this._adjustRT!
+
+    // 1) 把本层之下 + 本层之后的层暂时隐藏，只把"之下"渲染进 RT
+    //    （之上层若一起进 RT 会出现"模糊残影"叠在自己上面）
+    const index = layers.indexOf(l)
+    const above = layers.slice(index + 1).map((x) => this.displayObjectFor(x.id)).filter((o): o is Sprite | Container => !!o)
+    const prevVisible = above.map((o) => o.visible)
+    above.forEach((o) => { o.visible = false })
+    sprite.visible = false
+    try {
+      this.app.renderer.render({ container: this.root!, target: rt, clear: true })
+    } catch (e) {
+      console.warn('[PixiRenderer] 调整层渲染失败:', (e as Error)?.message)
+    } finally {
+      above.forEach((o, i) => { o.visible = prevVisible[i] })
+    }
+
+    // 2) 模糊精灵叠回：BlurFilter(strength=radius) + 强度作 alpha
+    this._adjustFilter!.strength = radius
+    this._adjustColor!.reset()
+    if (saturation > 0.001) this._adjustColor!.saturate(saturation * 0.6, false)
+    if (darken > 0.001) this._adjustColor!.brightness(1 - darken, false)
+    sprite.filters = radius > 0.3
+      ? (darken > 0.001 || saturation > 0.001 ? [this._adjustFilter!, this._adjustColor!] : [this._adjustFilter!])
+      : (darken > 0.001 || saturation > 0.001 ? [this._adjustColor!] : [])
+    sprite.texture = rt
+    sprite.width = w
+    sprite.height = h
+    sprite.alpha = Math.min(1, Math.max(0, strength)) * l.opacity
+    sprite.zIndex = l.z
+    sprite.visible = true
+    void frame
+    void fps
+  }
+
+  /** 取某层的显示对象（精灵/文本容器/预设精灵） */
+  private displayObjectFor(id: string): Sprite | Container | null {
+    return this.sprites.get(id) ?? this.textLayers.get(id)?.root ?? null
+  }
+
+  /** 取某 src 的可用图片源（供预设 drawer 的 drawImage 使用；未就绪返回 null） */
+  private presetImageSource(src: string): PresetImage | null {
+    const tex = this.textureFor(src)
+    const res = tex?.source?.resource as unknown as PresetImage | undefined
+    if (!res || typeof res !== 'object') return null
+    const w = Number((res as { width?: number }).width ?? 0)
+    const h = Number((res as { height?: number }).height ?? 0)
+    return w > 0 && h > 0 ? res : null
+  }
+
+  /**
+   * 把预设层画到离屏 canvas 并返回纹理。
+   * 与导出走**同一个 drawer**（`presets/registry.drawPreset`），因此预览与导出像素一致；
+   * 只有内容 key（帧/参数/尺寸/图片就绪）变化时才重绘，避免每帧无谓重画。
+   */
+  private renderPresetToTexture(l: Layer, meta: PresetMeta, frame: number, project: Project, fps: number): Texture | null {
+    const w = project.stage.width
+    const h = project.stage.height
+    let rec = this._presetRenders.get(l.id)
+    if (!rec || rec.canvas.width !== w || rec.canvas.height !== h) {
+      if (rec) { try { rec.tex.destroy(true) } catch { /* 忽略 */ } }
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return null
+      rec = { canvas, ctx, tex: Texture.from(canvas), key: '' }
+      this._presetRenders.set(l.id, rec)
+    }
+
+    const image = l.src ? this.presetImageSource(l.src) : null
+    const images = new Map<string, PresetImage>()
+    for (const p of meta.params) {
+      if (p.type !== 'image') continue
+      const v = l.params?.[p.key]
+      if (typeof v === 'string' && v) {
+        const s = this.presetImageSource(v)
+        if (s) images.set(v, s)
+      }
+    }
+
+    const key = `${l.presetId}|${JSON.stringify(l.params ?? {})}|${frame}|${w}x${h}|${image ? 'i' : '-'}|${images.size}`
+    if (rec.key === key) return rec.tex
+
+    rec.ctx.clearRect(0, 0, w, h)
+    drawPreset(rec.ctx, meta, {
+      width: w,
+      height: h,
+      frame,
+      fps,
+      timeSec: l.sourceFrame / (fps || 30),
+      sourceFrame: l.sourceFrame,
+      energy: levelAt(this._audioData, frame),
+      audio: this._audioData,
+      opacity: 1, // 层透明度由 sprite.alpha 施加（与导出的 alpha 相乘等价）
+      image,
+      images
+    }, l.params)
+    rec.tex.source.update()
+    rec.key = key
+    return rec.tex
+  }
+
   /** 获取/复用纹理（视频返回 video 元素纹理） */
-  private textureFor(src: string): Texture | null {
-    if (!src) return null
+  private textureFor(src: string): Texture | null {    if (!src) return null
     if (looksLikeImage(src)) {
       // 图片：懒加载到 Assets 缓存（blob:/本地路径首次 load，之后复用）
       try {
@@ -637,7 +646,6 @@ export class PixiRenderer {
       }
     }
     // 视频：复用 <video> 元素作为纹理源
-    if (this._videoGiveUp.has(src)) return null // 已放弃该源：不再重建 <video>（避免退役→重建死循环）
     let el = this.videoEls.get(src)
     if (!el) {
       el = document.createElement('video')
@@ -653,7 +661,7 @@ export class PixiRenderer {
       el.preload = 'auto'
       el.playsInline = true
       el.addEventListener('error', () => {
-        console.error('[PixiRenderer] video error:', src, el.error?.code, el.error?.message)
+        console.error('[PixiRenderer] video error:', src, el?.error?.code, el?.error?.message)
       })
       this.videoEls.set(src, el)
       el.play().catch(() => {
@@ -701,7 +709,11 @@ export class PixiRenderer {
   /** 异步加载图片纹理到 Assets 缓存（带去重） */
   private async loadImage(src: string): Promise<void> {
     const key = `img:${src}`
-    if (this.imageLoading.has(key)) return this.imageLoading.get(key)!
+    if (this.imageLoading.has(key)) {
+      // 已有在途加载 → 等它完成即可（返回值不是本函数的语义）
+      await this.imageLoading.get(key)
+      return
+    }
     const p = Assets.load(src).then((t) => { this.imageLoading.delete(key); return t })
     this.imageLoading.set(key, p)
     await p
@@ -717,168 +729,6 @@ export class PixiRenderer {
     this.videoTargetSec.delete(src)
   }
 
-  /**
-   * 尝试用 WebCodecs 预解码缓存为某视频层上当前帧（可加性加速）。
-   * - 命中：把 sp.texture 换成 ImageBitmap 纹理，返回 true；
-   * - 未附着管理器 / 无 provider / 非 ready / AU 缓存 miss / 纹理构建失败 → false（调用方走 <video> 兜底）。
-   * 同 AU 复用已建纹理，跨 AU 才重建（避免每帧 GPU 上传抖动）。
-   */
-  private _tryDecodeVideo(l: Layer, src: string, proxySrc: string | null, sp: Sprite, fps: number): boolean {
-    // 仅导出(_awaitDecode)才诊断"未接管原因"；预览无管理器是正常态，静默走 <video> 兜底，不打噪音。
-    const reason0 = (r: string): boolean => {
-      if (this._awaitDecode) this._dbgOnce(r)
-      return false
-    }
-    if (!this._decode) return false // 预览：无解码管理器，属正常（仅导出 attachDecode 后有）
-    const session = this._sessionForSrc(src)
-    if (!session) return reason0('decode:无会话(src=' + src.slice(0, 50) + ', 代理=' + (proxySrc ?? '-').slice(0, 50) + ')')
-    const prov = session.provider
-    if (prov.status !== 'ready') return reason0('decode:provider非ready(status=' + prov.status + ', openError=' + (prov as { openError?: string }).openError + ')')
-    // 计算目标源 AU
-    const fpsProj = fps || 30
-    let au = this._decode!.auForFrame(session, l.sourceFrame, fpsProj)
-    if (!Number.isFinite(au) || au < 0) return reason0('decode:au非法(au=' + au + ',sourceFrame=' + l.sourceFrame + ')')
-    const nAus = prov.auCount
-    if (nAus < 1) return reason0('decode:auCount=0')
-    // 超长(视频循环/拉长填满) clip：sourceFrame 超过素材帧数 → 按 AU 取模回绕，等价于 <video>
-    // syncVideo 对 target 秒数 `% duration` 的受控循环（au = round(秒×sourceFps)，模 auCount 对齐素材帧数）。
-    if (au >= nAus) au = au % nAus
-    // 预解码推进（fire-and-forget：单调喂超前窗口，keep decode busy）
-    prov.setPlayhead(au)
-    const hit = prov.current(au)
-    if (!hit) { // miss → 计数
-      this._decodeMisses++
-      if (this._awaitDecode) {
-        // 导出期：宁可用上一帧解码纹理，也绝不回退 <video>。回退会另起一条 GPU 视频解码器，
-        // 与 WebCodecs 解码路径抢同一块 GPU，还会触发"卡死→退役"反复——这正是导出中段
-        // WebGL CONTEXT_LOST（GPU TDR）的诱因之一。captureFrame 阶段零已 await 过该 AU，
-        // 此处的 miss 属极少数竞态（多为 loop 回绕瞬间），沿用上一帧即可，正确性损失可忽略。
-        return true
-      }
-      return reason0('decode:miss(au=' + au + ',cacheSize=' + prov.cacheSize + ')')
-    }
-    this._decodeHits++
-    // 解码命中：若此前某帧曾为此源创建过 <video>(冷启动兜底)而残留，把它静音停稳，
-    // 否则 _hasAsyncWork 会因 el.seeking/未 paused 而让 captureFrame 空转等待、拖慢解码命中的帧。
-    // 同时停原始与代理两种 key 的残留元素（兜底 <video> 可能按任一种建的）。
-    this._quietVideoFor(src)
-    if (proxySrc && proxySrc !== src) this._quietVideoFor(proxySrc)
-    // 同 AU 复用纹理
-    const prev = this._decodeTex.get(l.id)
-    if (prev && prev.au === au) {
-      if (sp.texture !== prev.tex) sp.texture = prev.tex
-      return true
-    }
-    try {
-      const tex = new Texture({ source: new ImageSource({ resource: hit.bitmap }) })
-      if (!tex || tex.width < 1 || tex.height < 1) { tex?.destroy(); return false }
-      // 释放旧纹理（若有）
-      if (prev) { try { prev.tex.destroy() } catch { /* 忽略 */ } }
-      this._decodeTex.set(l.id, { au, tex })
-      sp.texture = tex
-      return true
-    } catch (err) {
-      console.warn('[PixiRenderer] decode texture build failed (fallback <video>):', (err as Error)?.message)
-      return false
-    }
-  }
-
-  /** 若某源残留 <video> 元素（冷启动兜底创建），把画面交给解码路径后的收尾：
-   *  - 已能停稳(paused/非 seeking) → 仅 pause 保留，_hasAsyncWork 见 paused 便不再等待；
-   *  - 卡在 buffering(readyState<2) 或持续 seeking/播放 → 该元素已不被视觉使用、纯属浪费带宽且会
-   *    让 _hasAsyncWork() 一直为 true → 彻底 retire（remove+销毁纹理），否则导出 captureFrame 会在
-   *    阶段一 wait 循环里空转最多 300×10ms/帧（这正是"decode 命中仍慢、capture 占比 66%"的一个来源）。 */
-  private _quietVideoFor(src: string): void {
-    const el = this.videoEls.get(src)
-    if (!el) return
-    try { el.pause() } catch { /* 忽略 */ }
-    const wedged =
-      (typeof el.readyState === 'number' && el.readyState < 2) ||
-      el.seeking === true ||
-      el.paused === false
-    if (!wedged) return
-    this._retireVideoEl(src)
-  }
-
-  /** 彻底退役一个 <video> 元素（destroy 纹理 + 移出 videoEls），让 _hasAsyncWork 不再被它拖住。 */
-  private _retireVideoEl(src: string): void {
-    const el = this.videoEls.get(src)
-    if (!el) return
-    try { el.pause() } catch { /* 忽略 */ }
-    try {
-      const t = Texture.from(el)
-      if (t) t.destroy()
-    } catch { /* 忽略 */ }
-    this.videoEls.delete(src)
-    this.videoTargetSec.delete(src)
-  }
-
-  /**
-   * 导出模式（_awaitDecode）阶段一/二空转太久时调用：把"持续 seeking/未暂停 超过 budget"的
-   * <video> 强制退役。这类 video 是**非解码覆盖源**的兜底(解码覆盖源已在阶段零 await 就绪、
-   * 命中即 _quietVideoFor，不会走到这)。一个卡死的 avn 代理 <video>(如 Chromium 解不动)
-   * 会让 _hasAsyncWork 恒 true → 阶段一最多空转 300×10ms/帧(实测 3s) → 整体拖到 3fps。
-   * 退役它 = 弃用该帧的 <video> 兜底(显示旧帧/空),而不是让整个导出每帧卡 3 秒。
-   * @param budgetIters 该 video 已连续卡住的迭代数阈值
-   */
-  private _forceQuietStuckInExport(budgetIters: number, spinCount: number): void {
-    if (!this._awaitDecode) return
-    if (spinCount < budgetIters) return // 还没到阈值，给正常 seek 一点时间
-    for (const [src, el] of Array.from(this.videoEls.entries())) {
-      const stuck =
-        (typeof el.readyState === 'number' && el.readyState < 2) ||
-        el.seeking === true ||
-        el.paused === false
-      if (!stuck) continue
-      // 退役 + 标记"放弃"：本次导出不再为它重建 <video>（否则每帧退役→重建→再卡死=GPU 空转/风扇狂转/主线程卡死）
-      this._retireVideoEl(src)
-      this._videoGiveUp.add(src)
-      console.warn(`[Export-decode] 源 <video> 卡死已退役并放弃(本导出不再重建): ${src.slice(-40)}`)
-    }
-  }
-
-  /** 由层 src(effective) 反查解码会话（需已 registerSrc/传入 mapSrcToPath） */
-  private _sessionForSrc(src: string): import('./h264/decodeSources').DecodeSession | null {
-    if (!this._decode) return null
-    // 优先用外部映射函数拿绝对路径
-    if (this._decodeSrcToPath) {
-      const p = this._decodeSrcToPath(src)
-      if (p) {
-        const s = this._decode.sessionForPath(p)
-        if (s) return s
-      }
-      return null
-    }
-    return this._decode.sessionForSrc(src)
-  }
-
-  /**
-   * 收集当前帧所有"可走解码路径"的活跃视频层 → { src: { session, au } }。
-   * captureFrame(_awaitDecode) 用它先 await 各目标 AU 就绪，让随后的 render 命中解码缓存，
-   * 而非一 miss 就回退 <video> seek——把"主线程消费"与"解码预取"解耦（导出提速核心）。
-   */
-  private _decodeTargetsFor(frame: number, project: Project, fps: number): Map<string, { session: import('./h264/decodeSources').DecodeSession; au: number }> {
-    const out = new Map<string, { session: import('./h264/decodeSources').DecodeSession; au: number }>()
-    if (!this._decode) return out
-    const fpsProj = fps || 30
-    try {
-      const scene = resolveTimeline(frame, project)
-      for (const v of scene.videos) {
-        if (looksLikeImage(v.src)) continue
-        const eff = effectiveVideoSrc(v.src)
-        const session = this._sessionForSrc(eff)
-        if (!session) continue
-        const prov = session.provider
-        if (prov.status !== 'ready' || prov.auCount < 1) continue
-        let au = this._decode.auForFrame(session, v.sourceFrame, fpsProj)
-        if (!Number.isFinite(au) || au < 0) continue
-        if (au >= prov.auCount) au = au % prov.auCount
-        // 同层去重（场景里同 src 可能多条，取同 AU 无妨）
-        out.set(eff, { session, au })
-      }
-    } catch { /* resolve 失败忽略，走 <video> 兜底 */ }
-    return out
-  }
 
   /**
    * 帧同步视频：把视频元素当作时间轴的"奴隶"，让它停靠/播放到目标源秒，绝不脱离时间轴自由循环。
@@ -997,7 +847,7 @@ export class PixiRenderer {
     t.style.fill = d.color
     t.style.fontFamily = tb.fontFamily ?? 'sans-serif'
     t.style.fontSize = d.size
-    t.style.fontWeight = d.weight
+    t.style.fontWeight = String(d.weight) as TextStyleFontWeight
     t.style.lineHeight = (tb.lineHeight ?? 1.4) * d.size
     t.style.wordWrap = true
     t.style.wordWrapWidth = tb.wordWrapWidth
@@ -1028,12 +878,11 @@ export class PixiRenderer {
     for (const [id, tl] of this.textLayers) {
       if (!live.has(id)) { tl.root.destroy(); this.textLayers.delete(id) }
     }
-    // 释放已消失层的解码纹理
-    for (const id of Array.from(this._decodeTex.keys())) {
+    // 预设层：回收离屏画布与纹理
+    for (const [id, rec] of this._presetRenders) {
       if (!live.has(id)) {
-        const d = this._decodeTex.get(id)
-        if (d) { try { d.tex.destroy() } catch { /* 忽略 */ } }
-        this._decodeTex.delete(id)
+        try { rec.tex.destroy(true) } catch { /* 忽略 */ }
+        this._presetRenders.delete(id)
       }
     }
   }
@@ -1048,9 +897,6 @@ export class PixiRenderer {
       try { this.app.ticker.stop() } catch { /* 忽略 */ }
     }
     if (this._proxyUnsub) { this._proxyUnsub(); this._proxyUnsub = null }
-    this._clearDecodeTextures()
-    this._decode = null
-    this._decodeSrcToPath = null
     for (const el of this.videoEls.values()) el.pause()
     this.videoEls.clear()
     this.videoTargetSec.clear()
@@ -1058,6 +904,8 @@ export class PixiRenderer {
     this.sprites.clear()
     this.textLayers.forEach((tl) => tl.root.destroy())
     this.textLayers.clear()
+    for (const rec of this._presetRenders.values()) { try { rec.tex.destroy(true) } catch { /* 忽略 */ } }
+    this._presetRenders.clear()
     if (this.app) {
       // ⚠ 绝不能 releaseGlobalResources：`TexturePool`/`CanvasPool`/`BigPool` 是 **模块级单例**，
       // 跨所有 Application(预览+导出)共享。若用 destroy(true,true)/destroy({releaseGlobalResources:true})，

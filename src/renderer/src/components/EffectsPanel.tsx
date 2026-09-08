@@ -13,7 +13,6 @@ export const DRAG_MIME = 'application/x-avn-template'
 
 /** 右上：效果面板 —— 按大类分类的效果库，支持点击/拖拽添加到时间轴 */
 export default function EffectsPanel({ categories, onAddTemplate, playheadFrame }: EffectsPanelProps): React.JSX.Element {
-  const [activeTab, setActiveTab] = useState<'effects' | 'history'>('effects')
   const [open, setOpen] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(categories.map((c) => [c.id, true]))
   )
@@ -42,22 +41,10 @@ export default function EffectsPanel({ categories, onAddTemplate, playheadFrame 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div className="tabline">
-        <span
-          className={`tab ${activeTab === 'effects' ? 'active' : ''}`}
-          onClick={() => setActiveTab('effects')}
-        >
-          效果
-        </span>
-        <span
-          className={`tab ${activeTab === 'history' ? 'active' : ''}`}
-          onClick={() => setActiveTab('history')}
-        >
-          历史记录
-        </span>
+        <span className="tab active">效果</span>
       </div>
 
-      {activeTab === 'effects' ? (
-        <>
+      <>
           <div className="search">
             <span className="search-icon">⌕</span>
             <input
@@ -136,12 +123,7 @@ export default function EffectsPanel({ categories, onAddTemplate, playheadFrame 
               </div>
             ))}
           </div>
-        </>
-      ) : (
-        <div style={{ flex: 1, overflow: 'auto', padding: 14, color: 'var(--text-faint)', fontSize: 12 }}>
-          历史记录将在后续阶段实现。
-        </div>
-      )}
+      </>
     </div>
   )
 }

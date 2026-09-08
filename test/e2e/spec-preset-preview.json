@@ -1,0 +1,17 @@
+{
+  "mode": "preview",
+  "out": "F:\\ExportTest\\unused-preset-preview.mp4",
+  "seconds": 4,
+  "fps": 30,
+  "stage": [1920, 1080],
+  "benchFrames": 40,
+  "video": "F:\\ExportTest\\output_crop_noaudio_10to20.mp4",
+  "audio": "F:\\ExportTest\\流萤_后会无期.mp3",
+  "lrc": "F:\\ExportTest\\后会无期_-_徐良、汪苏泷_-_tx_-_tx_004gZy7l1GYJ1Q_-_128k.lrc",
+  "presets": [
+    { "id": "particle-waveform", "seconds": 4 },
+    { "id": "rounded-rect", "seconds": 4, "image": "F:\\ExportTest\\sticker-test.png", "params": { "posX": -0.28, "posY": 0.26, "scaleX": 0.34, "scaleY": 0.34, "radius": 0.12 } },
+    { "id": "circle", "seconds": 4, "image": "F:\\ExportTest\\sticker-test.png", "params": { "posX": 0.28, "posY": 0.26, "scaleX": 0.3, "scaleY": 0.3, "borderTexture": "", "spin": 0.6 } },
+    { "id": "sticker", "seconds": 4, "image": "F:\\ExportTest\\sticker-test.png", "params": { "posX": 0, "posY": -0.26, "scaleX": 0.22, "scaleY": 0.22, "rotation": 18 } }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "format": "avnpreset",
+  "version": 1,
+  "id": "sticker",
+  "name": "贴纸",
+  "category": "image",
+  "clipType": "image",
+  "kind": "image",
+  "drawer": "image-shape",
+  "durationFrames": 150,
+  "color": "#c05a3a",
+  "desc": "直接放置 PNG 贴纸，保留透明通道，可静态旋转。",
+  "params": [
+    { "key": "shape", "label": "形状", "type": "select", "group": "形状", "options": [{ "value": "sticker", "label": "贴纸" }], "default": "sticker" },
+    { "key": "posX", "label": "位置 X", "type": "number", "group": "布局", "min": -0.5, "max": 0.5, "step": 0.005, "default": 0, "percent": true },
+    { "key": "posY", "label": "位置 Y", "type": "number", "group": "布局", "min": -0.5, "max": 0.5, "step": 0.005, "default": 0, "percent": true },
+    { "key": "scaleX", "label": "缩放 X", "type": "number", "group": "布局", "min": 0.05, "max": 4, "step": 0.01, "default": 1 },
+    { "key": "scaleY", "label": "缩放 Y", "type": "number", "group": "布局", "min": 0.05, "max": 4, "step": 0.01, "default": 1, "link": "scaleX" },
+    { "key": "rotation", "label": "旋转角度", "type": "number", "group": "布局", "min": -180, "max": 180, "step": 1, "default": 0, "unit": "°" },
+    { "key": "shadow", "label": "投影", "type": "number", "group": "样式", "min": 0, "max": 1, "step": 0.01, "default": 0.35 },
+    { "key": "shadowColor", "label": "投影颜色", "type": "color", "group": "样式", "default": "#000000" }
+  ]
+}

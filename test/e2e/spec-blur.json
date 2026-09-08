@@ -1,0 +1,25 @@
+{
+  "out": "F:\\ExportTest\\e2e-blur-6s.mp4",
+  "seconds": 6,
+  "fps": 30,
+  "stage": [1920, 1080],
+  "video": "F:\\ExportTest\\output_crop_noaudio_10to20.mp4",
+  "presets": [
+    {
+      "id": "gaussian-blur",
+      "seconds": 6,
+      "params": { "strength": 1, "radius": 2, "darken": 0 },
+      "keyframes": {
+        "radius": [
+          { "t": 0, "v": 2 },
+          { "t": 0.5, "v": 70 },
+          { "t": 1, "v": 2 }
+        ]
+      }
+    }
+  ],
+  "frameChecks": [
+    { "a": 0.2, "b": 3, "expect": "differ", "max": 0.9 },
+    { "a": 0.2, "b": 5.8, "expect": "same", "min": 0.85 }
+  ]
+}

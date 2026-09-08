@@ -91,23 +91,25 @@ export function initFileLog(): FileLog {
 function attachWindow(wc: WebContents): void {
   if (!wc || wc.isDestroyed()) return
   try {
-    // console-message 事件签名跨 Electron 版本不同：新版本为 (event, {level,message,lineNumber,...})
-    // 兼容处理两种。
+    // console-message 事件签名（Electron 43 实测，见 electron.d.ts WebContents）：
+    //   (details: Event<WebContentsConsoleMessageEventParams>, level: number, message: string, line, sourceId)
+    //   details 上同时挂了 {level, message, lineNumber, sourceId}，而 args[1] 是**数字 level**、
+    //   args[2] 才是消息文本。此前误把 args[1] 当 message → 落盘日志全变成 "1"/"2"，
+    //   渲染进程的所有诊断（[Export-cap]/[Export-perf]/[DecodeSource]/WebGL 报错）全部丢失。
+    // 兼容取法：优先用 args[2]（旧版签名），否则回退 details.message。
     wc.on('console-message', (...args: unknown[]) => {
-      const ev = args[1] as { level?: number | string; message?: string } | undefined
+      const details = args[0] as { level?: number | string; message?: string } | undefined
       let levelNum = typeof args[1] === 'number' ? (args[1] as number) : -1
-      let message: string = ''
-      if (ev && typeof ev === 'object' && 'message' in ev) {
-        message = String(ev.message ?? '')
-        const lv = ev.level
+      let message = typeof args[2] === 'string' ? (args[2] as string) : ''
+      if (details && typeof details === 'object' && typeof details.message === 'string') {
+        if (!message) message = details.message
+        const lv = details.level
         if (typeof lv === 'number') levelNum = lv
         else if (lv === 'info') levelNum = 1
         else if (lv === 'warning') levelNum = 2
         else if (lv === 'error') levelNum = 3
-        else levelNum = 1
-      } else {
-        message = String(args[1] ?? '')
       }
+      if (levelNum < 0) levelNum = 1
       const tag = levelNum >= 3 ? 'ERR' : levelNum === 2 ? 'WARN' : 'LOG'
       write(`[render:${tag}] ${message}`)
     })
@@ -115,10 +117,8 @@ function attachWindow(wc: WebContents): void {
     wc.on('render-process-gone', (_e, details) => {
       write(`[render-process-gone] reason=${details.reason} exitCode=${details.exitCode}`)
     })
-    // GPU 进程崩溃（WebGL CONTEXT_LOST 根源）：webContents 上无 direct，但 console 会带；此处附 app 级已由 child-process-gone 覆盖。
-    wc.on('gpu-process-crashed', () => {
-      write(`[render:gpu-process-crashed] WebGL context lost 需重建`)
-    })
+    // GPU 进程崩溃（WebGL CONTEXT_LOST 根源）：Electron 已移除 webContents 的 'gpu-process-crashed'
+    // 事件（改由 app 级 'child-process-gone' type=gpu 覆盖，见 initFileLog），此处不再监听。
   } catch {
     /* 忽略 attach 失败 */
   }

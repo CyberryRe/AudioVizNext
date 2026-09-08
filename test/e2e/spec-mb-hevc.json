@@ -1,0 +1,10 @@
+{
+  "mode": "mb",
+  "out": "F:\\ExportTest\\e2e-mb-hevc-6s.mp4",
+  "seconds": 6,
+  "fps": 30,
+  "stage": [1920, 1080],
+  "video": "F:\\ExportTest\\hevc-bg-6s.mp4",
+  "audio": "F:\\ExportTest\\流萤_后会无期.mp3",
+  "lrc": "F:\\ExportTest\\后会无期_-_徐良、汪苏泷_-_tx_-_tx_004gZy7l1GYJ1Q_-_128k.lrc"
+}

@@ -1,0 +1,14 @@
+{
+  "out": "F:\\ExportTest\\e2e-mb-20s.mp4",
+  "seconds": 20,
+  "fps": 30,
+  "stage": [1920, 1080],
+  "video": "F:\\ExportTest\\output_crop_noaudio_10to20.mp4",
+  "audio": "F:\\ExportTest\\流萤_后会无期.mp3",
+  "lrc": "F:\\ExportTest\\后会无期_-_徐良、汪苏泷_-_tx_-_tx_004gZy7l1GYJ1Q_-_128k.lrc",
+  "frameChecks": [
+    { "a": 1, "b": 11, "expect": "same", "min": 0.85 },
+    { "a": 1, "b": 6, "expect": "differ", "max": 0.8 },
+    { "a": 11, "b": 19, "expect": "differ", "max": 0.8 }
+  ]
+}

@@ -88,12 +88,13 @@ export interface EffectTemplate {
   clampToSource?: boolean
   /** 歌词类 clip：关联歌词素材 + 歌词样式编辑（滚动歌词等）。 */
   isLyrics?: boolean
+  /** 预设样式 id（由 presets/registry 的 presetCategories() 生成；见 presets/types.ts） */
+  presetId?: string
 }
 
 /**
- * 效果分类（Stage 2 骨架）。
- * 其中「可视化」下放了 test clip，用于验证「拖拽创建 Clip」的整条业务链路，
- * 真正的可视化渲染后续阶段再接。
+ * 基础 Clip 模板（非预设）。这些是"素材类"落轨模板：拖到时间轴后需要关联素材。
+ * 预设样式（presets/**）由 `presets/registry.presetCategories()` 生成，App 里两者合并。
  */
 export function createEffectCategories(): EffectCategory[] {
   return [
@@ -140,16 +141,7 @@ export function createEffectCategories(): EffectCategory[] {
           id: 'tpl-lyrics-scroll', name: '滚动歌词', kind: 'text', clipType: 'text', durationFrames: 30 * 8, color: '#8a5a2a',
           isLyrics: true,
           desc: '关联 LRC 歌词，随播放滚动高亮当前句'
-        },
-        { id: 'tpl-lyrics-karaoke', name: '卡拉OK歌词', kind: 'text', clipType: 'text', durationFrames: 30 * 6, color: '#8a5a2a', desc: 'LRC 歌词逐行高亮' }
-      ]
-    },
-    {
-      id: 'visual',
-      name: '可视化',
-      icon: '◎',
-      items: [
-        { id: 'tpl-visual-test', name: 'Test Clip', kind: 'visual', clipType: 'text', durationFrames: 30 * 4, color: '#c05a3a', desc: '拖拽业务验证占位' }
+        }
       ]
     }
   ]
@@ -172,6 +164,8 @@ export function clipFromTemplate(tpl: EffectTemplate, trackId: string): ReturnTy
     clampToSource: tpl.clampToSource,
     maxDurationFrames: tpl.clampToSource ? tpl.durationFrames : undefined,
     // 歌词类：标记，效果控件显示歌词样式编辑
-    isLyrics: tpl.isLyrics || undefined
+    isLyrics: tpl.isLyrics || undefined,
+    // 预设样式：记 id；参数留空，由 preset.json 的 schema 默认值补齐
+    presetId: tpl.presetId
   })
 }

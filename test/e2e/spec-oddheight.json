@@ -1,0 +1,10 @@
+{
+  "out": "F:\\ExportTest\\e2e-oddheight-21x9.mp4",
+  "seconds": 20,
+  "fps": 30,
+  "stage": [1920, 823],
+  "video": "F:\\ExportTest\\output_crop_noaudio_10to20.mp4",
+  "audio": "F:\\ExportTest\\流萤_后会无期.mp3",
+  "lrc": "F:\\ExportTest\\后会无期_-_徐良、汪苏泷_-_tx_-_tx_004gZy7l1GYJ1Q_-_128k.lrc",
+  "device": "auto"
+}

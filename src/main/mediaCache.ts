@@ -130,7 +130,7 @@ function broadcast(channel: string, payload: unknown): void {
 }
 
 /** 用 ffprobe 读视频基本信息（JSON 输出） */
-function probeWithFfprobe(ffprobe: string, src: string): ProxyMeta['durationSec' | 'fps' | 'width' | 'height'] | null {
+function probeWithFfprobe(ffprobe: string, src: string): { durationSec: number; fps: number; width: number; height: number } | null {
   try {
     const raw = execFileSync(
       ffprobe,
@@ -214,7 +214,7 @@ export function ensureProxy(src: string): EnsureResult {
   const q = queue.get(src)
   if (q) return { state: q.state === 'running' ? 'transcoding' : 'queued', original: src }
 
-  queue.set(src, { state: 'queued' })
+  queue.set(src, { original: src, state: 'queued' })
   // 异步启动转码（不 await，立即返回 queued/transcoding）
   void runTranscode(ffmpeg, src, proxyPath, metaPath, dir)
   return { state: 'queued', original: src }
@@ -310,8 +310,10 @@ export function hasFfmpeg(): boolean {
 
 /**
  * 对外探测视频信息（供渲染层取真实帧率等元数据）。内部解析 ffprobe；不可用返回 null。
+ * 注意返回类型是**对象**（此前误写成 `ProxyMeta['durationSec' | 'fps' | ...]` = number，
+ * 导致调用方 `info.durationSec` 被 TS 判为不存在——真实运行没问题，但类型是错的）。
  */
-export function probeVideo(src: string): ProxyMeta['durationSec' | 'fps' | 'width' | 'height'] | null {
+export function probeVideo(src: string): { durationSec: number; fps: number; width: number; height: number } | null {
   if (!src || !existsSync(src)) return null
   const ffp = resolveBin('ffprobe')
   if (!ffp) return null

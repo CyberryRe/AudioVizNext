@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Project, Clip, Track, MediaAsset, TrackZone } from '../model/timeline'
 import { formatTimecode } from '../model/demo'
 import type { EffectTemplate } from '../model/demo'
@@ -158,12 +158,23 @@ export default function Timeline({
     })
   }
 
-  const handleWheel = (e: React.WheelEvent): void => {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault()
-      zoomAt(e.clientX, e.deltaY < 0 ? 1 : -1)
+  // Ctrl+滚轮缩放：React onWheel 在根容器上是 passive 监听，preventDefault 无效且刷
+  // "Unable to preventDefault inside passive event listener" 警告。
+  // 改用原生非 passive 监听直接挂在横向滚动容器上（阻止默认滚动 + 锚点缩放）。
+  useEffect(() => {
+    const el = hScrollRef.current
+    if (!el) return
+    const onNativeWheel = (e: WheelEvent): void => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        zoomAt(e.clientX, e.deltaY < 0 ? 1 : -1)
+      }
     }
-  }
+    el.addEventListener('wheel', onNativeWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onNativeWheel)
+    // zoomAt 只读 ref（pxRef/hScrollRef）+ 稳定回调（onZoomIn/onZoomOut），此二回调变化时重挂即可
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onZoomIn, onZoomOut])
 
   const handlePlayheadDrag = (e: React.MouseEvent): void => {
     e.stopPropagation()
@@ -234,7 +245,6 @@ export default function Timeline({
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div className="tabline">
         <span className="tab active">序列 01</span>
-        <span style={{ marginLeft: 'auto', color: '#888', cursor: 'pointer', fontSize: 14 }} title="时间轴设置">☰</span>
       </div>
 
       {/* 顶部留白工具条：添加轨道 */}
@@ -264,15 +274,13 @@ export default function Timeline({
           style={{ background: 'var(--bg-track-controls)', borderRight: '1px solid var(--border-dark)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
           data-role="timeline-left"
         >
-          {/* 顶部固定行：吸附/链接/设置 */}
+          {/* 顶部固定行：吸附开关（唯一在用的工具） */}
           <div style={{ height: RULER_HEIGHT, flex: 'none', borderBottom: '1px solid var(--border-dark)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', gap: 8, fontSize: 12, background: 'var(--bg-panel-head)' }}>
             <span
               title={snapEnabled ? '吸附：开（拖动 clip 自动吸附到其它 clip 首尾）' : '吸附：关'}
               onClick={() => setSnapEnabled((s) => !s)}
               style={{ cursor: 'pointer', color: snapEnabled ? 'var(--accent-playhead)' : 'inherit', fontWeight: snapEnabled ? 700 : 400 }}
             >⚓</span>
-            <span title="链接" style={{ cursor: 'pointer' }}>🔗</span>
-            <span title="轨道设置" style={{ cursor: 'pointer' }}>🔧</span>
           </div>
 
           <ZoneControls zone="video" tracks={videoTracks} collapsed={videoCollapsed} onToggleCollapse={() => setVideoCollapsed((c) => !c)} onToggleTrack={onToggleTrack} />
@@ -283,7 +291,6 @@ export default function Timeline({
         <div
           ref={hScrollRef}
           onScroll={onScroll}
-          onWheel={handleWheel}
           className="avn-hscroll-hidden"
           style={{ overflowX: 'auto', overflowY: 'hidden', position: 'relative', background: 'var(--bg-timeline)', cursor: 'crosshair' }}
           onDragOver={handleDragOver}
@@ -575,7 +582,8 @@ function ZoneRows({ zone, tracks, clips, pxPerFrame, selectedClipId, onSelectCli
                 } else if (targetTrackId && targetTrackId !== track.id) {
                   onMoveClipAcrossTracks(clip.id, targetTrackId, newStart, zone)
                 } else {
-                  onMove(newStart)
+                  // 同轨内拖动：直接移动该 clip（此前误写成未定义的 onMove → 运行时 ReferenceError）
+                  onMoveClip(clip.id, newStart)
                 }
               }}
               getAsset={getAsset}

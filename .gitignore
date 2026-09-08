@@ -44,7 +44,13 @@ electron.vite.config.*.mjs
 
 # ===== 本地开发文档与记忆（不上传公开仓库）=====
 .workbuddy/
-docs/
+# docs 下只发布对外指南，其余（内部工作流等）仍留在本地
+docs/*
+!docs/preset-authoring.md
+!docs/audio-algorithms.md
+!docs/presets.md
+!docs/export-gpu.md
+!docs/roadmap.md
 
 # ===== DeepSeek Harness（dsh）等 AI 编码助手本地产物（不入库）=====
 # dsh 会话 / 状态 / 缓存 / 临时文件可能落到仓库内，命名不可预期，按特征模式兜底忽略：

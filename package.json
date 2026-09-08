@@ -10,10 +10,12 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test:model": "node --experimental-strip-types test/model.test.mjs",
-    "test:h264": "node --experimental-strip-types test/esUtils.test.mjs && node --experimental-strip-types test/decodeProvider.test.mjs && node --experimental-strip-types test/decodeSources.test.mjs",
-    "test": "npm run test:model && npm run test:h264"
+    "test:avnpre": "node --experimental-strip-types test/avnpre.test.mjs",
+    "test:keyframes": "node --experimental-strip-types test/keyframes.test.mjs",
+    "test:audio": "node --experimental-strip-types test/audioAlgorithms.test.mjs",
+    "test": "npm run test:model && npm run test:avnpre && npm run test:keyframes && npm run test:audio"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -26,6 +28,7 @@
     "vite": "^7.0.0"
   },
   "dependencies": {
+    "mediabunny": "^1.55.7",
     "pixi.js": "^8.20.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

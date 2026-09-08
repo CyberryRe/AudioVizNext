@@ -16,16 +16,14 @@ interface MenuBarProps {
   stageSizeFor: (ratio: number, mainLength: number, orientation?: 'landscape' | 'portrait') => { width: number; height: number }
   /** 点「文件>导出」触发（由 App 承接完整导出流程） */
   onExport?: () => void
+  /** 点「文件>导入预设…」触发（.avnpre 导入） */
+  onImportPreset?: () => void
 }
-
-/** 只保留 文件 / 序列 / 帮助 三个菜单 */
-const FILES = ['新建项目', '打开项目…', '保存', '另存为…', '—', '导入', '导出', '—', '首选项…', '退出']
-const HELPS = ['关于 AudioVizNext', '文档']
 
 /** 标准分辨率预设（主边长度） */
 const MAIN_LENGTHS = [720, 1080, 1440, 1920, 2160, 3840]
 
-export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor, onExport }: MenuBarProps): React.JSX.Element {
+export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor, onExport, onImportPreset }: MenuBarProps): React.JSX.Element {
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const [seqOpen, setSeqOpen] = useState(false)
   const [prefsOpen, setPrefsOpen] = useState(false)
@@ -78,33 +76,18 @@ export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor,
       <span style={{ fontSize: 18, fontWeight: 700, marginRight: 4, color: '#eee', alignSelf: 'center' }}>◆</span>
 
       <div style={{ display: 'flex', alignItems: 'stretch' }}>
-        {/* 文件 */}
+        {/* 文件：只保留已实现的项（导入预设 / 导出 / 首选项 / 退出） */}
         <MenuRoot label="文件(F)" open={openMenu === 'file'} onToggle={() => setOpenMenu(openMenu === 'file' ? null : 'file')}>
-          {FILES.map((it, j) =>
-            it === '—' ? (
-              <div key={j} style={{ height: 1, background: '#3a3a3a', margin: '5px 10px' }} />
-            ) : it === '导出' ? (
-              <MenuItem key={j} label={it} onClick={() => { closeAll(); onExport?.() }} />
-            ) : it === '首选项…' ? (
-              <MenuItem key={j} label={it} onClick={() => { closeAll(); setPrefsOpen(true) }} />
-            ) : (
-              <MenuItem key={j} label={it} onClick={closeAll} />
-            )
-          )}
+          <MenuItem label="导入预设…(.avnpre)" onClick={() => { closeAll(); onImportPreset?.() }} />
+          <div style={{ height: 1, background: '#3a3a3a', margin: '5px 10px' }} />
+          <MenuItem label="导出视频…" onClick={() => { closeAll(); onExport?.() }} />
+          <div style={{ height: 1, background: '#3a3a3a', margin: '5px 10px' }} />
+          <MenuItem label="首选项…" onClick={() => { closeAll(); setPrefsOpen(true) }} />
         </MenuRoot>
 
         {/* 序列 */}
         <MenuRoot label="序列(S)" open={openMenu === 'seq'} onToggle={() => { setOpenMenu(openMenu === 'seq' ? null : 'seq'); setSeqOpen(false) }}>
-          <MenuItem label="新建序列" onClick={closeAll} />
-          <div style={{ height: 1, background: '#3a3a3a', margin: '5px 10px' }} />
           <MenuItem label="序列设置…" onClick={() => { setOpenMenu(null); setSeqOpen(true) }} active />
-        </MenuRoot>
-
-        {/* 帮助 */}
-        <MenuRoot label="帮助(H)" open={openMenu === 'help'} onToggle={() => setOpenMenu(openMenu === 'help' ? null : 'help')}>
-          {HELPS.map((it, j) => (
-            <MenuItem key={j} label={it} onClick={closeAll} />
-          ))}
         </MenuRoot>
       </div>
 

@@ -1,0 +1,26 @@
+{
+  "format": "avnpreset",
+  "version": 1,
+  "id": "particle-waveform",
+  "name": "粒子波形",
+  "category": "visualization",
+  "clipType": "visual",
+  "kind": "visual",
+  "drawer": "particle-waveform",
+  "durationFrames": 300,
+  "color": "#5b4b9e",
+  "desc": "波形线 + 频谱副线 + 沿波飞升的粒子（对齐 AudioViz Studio 同名样式）。",
+  "params": [
+    { "key": "posX", "label": "位置 X", "type": "number", "group": "布局", "min": -0.5, "max": 0.5, "step": 0.005, "default": 0, "percent": true },
+    { "key": "posY", "label": "位置 Y", "type": "number", "group": "布局", "min": -0.5, "max": 0.5, "step": 0.005, "default": 0, "percent": true },
+    { "key": "scaleX", "label": "缩放 X", "type": "number", "group": "布局", "min": 0.1, "max": 4, "step": 0.01, "default": 1 },
+    { "key": "scaleY", "label": "缩放 Y", "type": "number", "group": "布局", "min": 0.1, "max": 4, "step": 0.01, "default": 1, "link": "scaleX" },
+    { "key": "amplitude", "label": "波形振幅", "type": "number", "group": "线条", "min": 0.2, "max": 2, "step": 0.05, "default": 1 },
+    { "key": "lineGlow", "label": "线条辉光", "type": "number", "group": "线条", "min": 0, "max": 1, "step": 0.05, "default": 0.8 },
+    { "key": "color", "label": "线条颜色", "type": "color", "group": "线条", "default": "#a29bfe" },
+    { "key": "color2", "label": "副线颜色", "type": "color", "group": "线条", "default": "#3fe0ff" },
+    { "key": "particleCount", "label": "粒子数量", "type": "number", "group": "粒子", "min": 20, "max": 400, "step": 5, "default": 120 },
+    { "key": "particleGlow", "label": "粒子辉光", "type": "number", "group": "粒子", "min": 0, "max": 1, "step": 0.05, "default": 0.5 },
+    { "key": "gravity", "label": "重力", "type": "number", "group": "粒子", "min": 0, "max": 60, "step": 1, "default": 20 }
+  ]
+}

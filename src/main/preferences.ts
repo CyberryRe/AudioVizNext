@@ -7,18 +7,26 @@ import { readFileSync, writeFileSync } from 'fs'
 
 /**
  * 导出设备偏好（决定用哪块 GPU/哪种编码器做导出）：
- *  - 'auto'       自动（Chromium 默认 GPU + nvenc→amf→qsv→libx264 探测链）
+ *  - 'auto'       自动（先 WebCodecs 探测，失败回退 ffmpeg nvenc→amf→qsv→libx264）
  *  - 'discrete'   独显（Chromium force-high-performance-gpu；ffmpeg 优先 NVENC/AMF）
  *  - 'integrated' 核显（Chromium force-low-power-gpu；ffmpeg 优先 Quick Sync）
  *  - 'software'   纯软件（libx264，不用 WebCodecs 硬编）
+ *  - 'ffmpeg'     【调试用，UI 不提供】强制走 ffmpeg 编码路径（跳过 WebCodecs），
+ *                 用于与 WebCodecs 路径做画质/速度 A/B 对比；手动编辑 preferences.json 设置。
  */
-export type ExportDevicePref = 'auto' | 'discrete' | 'integrated' | 'software'
+export type ExportDevicePref = 'auto' | 'discrete' | 'integrated' | 'software' | 'ffmpeg'
 
 export interface Preferences {
   exportDevice: ExportDevicePref
 }
 
 export const PREF_DEFAULTS: Preferences = { exportDevice: 'auto' }
+
+const VALID = new Set<ExportDevicePref>(['auto', 'discrete', 'integrated', 'software', 'ffmpeg'])
+
+function sanitize(v: unknown): ExportDevicePref {
+  return typeof v === 'string' && VALID.has(v as ExportDevicePref) ? (v as ExportDevicePref) : 'auto'
+}
 
 let cached: Preferences | null = null
 
@@ -33,10 +41,7 @@ export function loadPreferences(): Preferences {
   try {
     const raw = readFileSync(preferencesPath(), 'utf8')
     const j = JSON.parse(raw) as Partial<Preferences>
-    if (j && typeof j === 'object') {
-      const v = j.exportDevice
-      p.exportDevice = v === 'discrete' || v === 'integrated' || v === 'software' ? v : 'auto'
-    }
+    if (j && typeof j === 'object') p.exportDevice = sanitize(j.exportDevice)
   } catch { /* 无配置文件/损坏 → 默认 */ }
   cached = p
   return p
@@ -44,7 +49,7 @@ export function loadPreferences(): Preferences {
 
 /** 保存首选项。 */
 export function savePreferences(p: Preferences): Preferences {
-  const next: Preferences = { exportDevice: p.exportDevice === 'discrete' || p.exportDevice === 'integrated' || p.exportDevice === 'software' ? p.exportDevice : 'auto' }
+  const next: Preferences = { exportDevice: sanitize(p?.exportDevice) }
   cached = next
   try {
     writeFileSync(preferencesPath(), JSON.stringify(next, null, 2), 'utf8')

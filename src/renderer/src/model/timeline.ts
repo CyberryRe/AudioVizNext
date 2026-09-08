@@ -16,7 +16,7 @@ export type TrackKind = 'video' | 'audio' | 'text'
 export type TrackZone = 'video' | 'audio'
 
 /** Clip 类型 */
-export type ClipType = 'video' | 'audio' | 'text' | 'image'
+export type ClipType = 'video' | 'audio' | 'text' | 'image' | 'visual' | 'effect'
 
 /** 变换（归一化 0..1，与分辨率无关） */
 export interface Transform {
@@ -99,6 +99,19 @@ export interface Clip {
   /** 是否为歌词类 clip（滚动歌词等） */
   isLyrics?: boolean
 
+  /**
+   * 预设样式 id（`presets/<分类>/<id>/preset.json`）。设置后该 clip 由预设 drawer 绘制：
+   * image 类预设仍用 `src` 绑定的图片，visual 类预设为生成式可视化（无需素材）。
+   */
+  presetId?: string
+  /** 预设参数（键 = preset.json 的 params[].key；缺省项由 schema 的 default 补齐） */
+  params?: Record<string, unknown>
+  /**
+   * 关键帧轨道：`keyframes[参数键] = [{ t, v }]`，t 为 clip 内相对时长 0..1。
+   * 求值 API 见 `presets/keyframes.ts`（预设 drawer 通过 `paramAt()` 取关键帧优先的值）。
+   */
+  keyframes?: import('../presets/keyframes').KeyframeTracks
+
   // 标志
   locked?: boolean
   disabled?: boolean
@@ -176,6 +189,10 @@ export interface Scene {
   audios: ActiveAudioClip[]
   texts: ActiveTextClip[]
   images: ActiveImageClip[]
+  /** 预设可视化层（无素材的生成式样式，如粒子波形） */
+  visuals: ActiveVisualClip[]
+  /** 预设效果层（作用于其下已合成画面的调整层，如高斯模糊） */
+  effects: ActiveEffectClip[]
 }
 
 interface ActiveClipBase {
@@ -188,6 +205,13 @@ interface ActiveClipBase {
   /** 更高 = 更靠近观看者 */
   zIndex: number
   transform?: Transform
+  /** 预设样式 id 与其参数（由预设 drawer 绘制；见 model.Clip.presetId） */
+  presetId?: string
+  params?: Record<string, unknown>
+  /** 关键帧轨道（相对 clip 时长 0..1），供预设 drawer 用 paramAt() 求值 */
+  keyframes?: import('../presets/keyframes').KeyframeTracks
+  /** clip 内相对进度 0..1（关键帧求值用；resolveTimeline 填） */
+  tRel?: number
 }
 
 export interface ActiveVideoClip extends ActiveClipBase {
@@ -211,6 +235,16 @@ export interface ActiveImageClip extends ActiveClipBase {
   type: 'image'
   src: string
   volume: number
+}
+
+/** 预设可视化 clip（无素材，drawer 生成画面，如粒子波形） */
+export interface ActiveVisualClip extends ActiveClipBase {
+  type: 'visual'
+}
+
+/** 预设效果 clip（调整层：作用于其下已合成画面，如高斯模糊） */
+export interface ActiveEffectClip extends ActiveClipBase {
+  type: 'effect'
 }
 
 // ===== 工厂 =====
@@ -245,7 +279,7 @@ export function createTrack(overrides?: Partial<Track>): Track {
 }
 
 /** 由轨道类型推断其所属分区 */
-export function zoneForKind(kind: TrackKind): TrackZone {
+export function zoneForKind(kind: TrackKind | 'image' | 'visual'): TrackZone {
   return kind === 'audio' ? 'audio' : 'video'
 }
 
@@ -269,15 +303,25 @@ export const STAGE_RATIOS: StageRatio[] = [
 
 /**
  * 依据比例 + 分辨率主边，计算舞台尺寸。
+ *
+ * ⚠ 必须偶数：H.264 的 4:2:0 色度抽样要求宽高皆为偶数，NV12 帧缓冲同样按偶数推导。
+ * 奇数尺寸（如 21:9 @1920 → 1920×823、9:16 @1920 → 1920×3413）会让色度面与亮度面错位——
+ * 导出画面底部出现整条绿色/花屏色块（预览正常、导出坏），WebCodecs 也会直接拒绝该尺寸配置
+ * 而悄悄退回更慢的 ffmpeg 路径。这里统一向上取到偶数，预览与导出保持一致。
+ *
  * @param ratio 宽高比（宽/高）
  * @param mainLength 主边像素（宽或高，取决于 orientation）
  */
 export function stageSizeFor(ratio: number, mainLength: number, orientation: 'landscape' | 'portrait' = 'landscape'): { width: number; height: number } {
+  const even = (n: number): number => {
+    const v = Math.round(n)
+    return v % 2 === 0 ? v : v + 1
+  }
   if (orientation === 'portrait') {
     // 高 > 宽：ratio = 宽/高 < 1
-    return { width: Math.round(mainLength * ratio), height: mainLength }
+    return { width: even(mainLength * ratio), height: even(mainLength) }
   }
-  return { width: mainLength, height: Math.round(mainLength / ratio) }
+  return { width: even(mainLength), height: even(mainLength / ratio) }
 }
 
 export function createClip(overrides?: Partial<Clip>): Clip {
@@ -724,7 +768,7 @@ export function sortClips(clips: Clip[]): Clip[] {
  *  - zIndex = (maxOrder - track.order) * 1000
  */
 export function resolveTimeline(frame: number, project: Project): Scene {
-  const scene: Scene = { frame, videos: [], audios: [], texts: [], images: [] }
+  const scene: Scene = { frame, videos: [], audios: [], texts: [], images: [], visuals: [], effects: [] }
 
   const maxOrder = project.tracks.reduce((m, t) => Math.max(m, t.order), 0)
 
@@ -741,8 +785,8 @@ export function resolveTimeline(frame: number, project: Project): Scene {
       const end = clip.startFrame + clip.durationFrames
       if (frame < clip.startFrame || frame >= end) continue
 
-      // 媒体 clip 无 src 则跳过
-      if (clip.type !== 'text' && !clip.src) continue
+      // 媒体 clip 无 src 则跳过（visual/effect 预设是生成式/调整层，无需素材）
+      if (clip.type !== 'text' && clip.type !== 'visual' && clip.type !== 'effect' && !clip.src) continue
 
       // 源帧映射
       const sourceFrame = frame - clip.startFrame + clip.sourceStartFrame
@@ -763,7 +807,11 @@ export function resolveTimeline(frame: number, project: Project): Scene {
         sourceFrame,
         opacity: clip.opacity ?? 1,
         zIndex,
-        transform: clip.transform
+        transform: clip.transform,
+        presetId: clip.presetId,
+        params: clip.params,
+        keyframes: clip.keyframes,
+        tRel: clip.durationFrames > 0 ? (frame - clip.startFrame) / clip.durationFrames : 0
       }
 
       switch (clip.type) {
@@ -778,6 +826,12 @@ export function resolveTimeline(frame: number, project: Project): Scene {
           break
         case 'image':
           scene.images.push({ ...base, type: 'image', src: clip.src!, volume: track.muted ? 0 : (clip.volume ?? 1) })
+          break
+        case 'visual':
+          scene.visuals.push({ ...base, type: 'visual' })
+          break
+        case 'effect':
+          scene.effects.push({ ...base, type: 'effect' })
           break
       }
     }

@@ -3,6 +3,7 @@ import type { Project, Clip } from '../model/timeline'
 import { resolveTimeline, parseLrc, lrcLineAt, designScreenPx } from '../model/timeline'
 import { formatTimecode } from '../model/demo'
 import { PixiRenderer } from '../pixi/PixiRenderer'
+import { computeAudioData } from '../media/audioAnalysis'
 import { initAudioBlob, resolvedAudioBlob, useAudioBlobTick } from '../media/audioBlob'
 
 interface MonitorProps {
@@ -38,8 +39,11 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
   // 收集音频 clip 的 <audio> 元素（「单次播放」等音频轨发声用）
   const audioRefs = useRef<(HTMLAudioElement | null)[]>([])
 
-  // ===== PixiJS 渲染管线（可选开启；开启后用 Pixi canvas 渲染视觉层，DOM 层兜底） =====
-  const [pixiOn, setPixiOn] = useState(false)
+  // ===== PixiJS 渲染管线（默认开启：与导出共用 layout.ts 几何/排版，DOM 仅在 Pixi 初始化失败时兜底） =====
+  // 为什么默认 Pixi：导出渲染器（Worker 里的 Canvas2D）用 mediaBox/resolveTextRows 排版，
+  // 只有 Pixi 预览走同一套；DOM 预览是另一套手写 CSS（媒体按 contain 适配、歌词单行无 karaoke 窗口），
+  // 与导出结果会有可见差异。Pixi 初始化失败会自动回退 DOM 并显示错误条（见下方 pixiErr）。
+  const [pixiOn, setPixiOn] = useState(true)
   const [pixiErr, setPixiErr] = useState<string | null>(null)
   const pixiRef = useRef<PixiRenderer | null>(null)
   const pixiHostRef = useRef<HTMLDivElement>(null)
@@ -70,6 +74,17 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
     pixiRef.current?.updateInput(frame, project, fps)
     pixiRef.current?.setPlaying(isPlaying)
   }, [pixiOn, frame, project, fps, isPlaying])
+
+  // 音频分析数据（可视化预设的驱动信号）：工程音频变化时重算一次，喂给 PixiRenderer。
+  // 与导出用的是同一套算法（analyzePcm），保证「预览 ≡ 导出」。
+  useEffect(() => {
+    if (!pixiOn) return
+    let cancelled = false
+    void computeAudioData(project)
+      .then((data) => { if (!cancelled) pixiRef.current?.setAudioData(data) })
+      .catch(() => { /* 无音频/解码失败 → 静息数据 */ })
+    return () => { cancelled = true }
+  }, [pixiOn, project])
 
   // 监听预览区尺寸，自适应缩放画幅(Mask)，改比例/窗口大小都会跟随
   useEffect(() => {
@@ -158,6 +173,8 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
 
   // 按 zIndex 升序排序，最后渲染的在上层。收集 transform 以应用缩放/位置。
   const textLayers = scene.texts.map((t) => ({ z: t.zIndex, clip: t }))
+  // 预设样式层（可视化/图片样式/效果层）只在 Pixi 后端渲染（与导出共用 drawer）；DOM 后端不画，下面给提示条
+  const hasPresetLayers = scene.visuals.length > 0 || scene.effects.length > 0 || scene.images.some((i) => !!i.presetId)
   const mediaLayers = [
     ...scene.videos.map((v) => ({ z: v.zIndex, src: v.src, opacity: v.opacity, transform: v.transform })),
     ...scene.images.map((i) => ({ z: i.zIndex, src: i.src, opacity: i.opacity, transform: i.transform }))
@@ -432,6 +449,13 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
         {pixiErr && (
           <div style={{ position: 'absolute', top: 8, left: 8, color: '#ff8080', fontSize: 11, background: 'rgba(0,0,0,.7)', padding: '4px 8px', borderRadius: 3, zIndex: 20 }}>
             Pixi 初始化失败（已回退 DOM 渲染）：{pixiErr}
+          </div>
+        )}
+
+        {/* DOM 后端不支持预设样式（可视化/图片样式）→ 明确提示，避免误以为样式丢失 */}
+        {!pixiOn && hasPresetLayers && (
+          <div style={{ position: 'absolute', top: 8, left: 8, color: '#ffd479', fontSize: 11, background: 'rgba(0,0,0,.7)', padding: '4px 8px', borderRadius: 3, zIndex: 20 }}>
+            预设样式（可视化/图片样式）需要 Pixi 渲染：请点右上角切到「渲染: Pixi」
           </div>
         )}
 
