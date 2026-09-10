@@ -43,14 +43,31 @@ export function drawRadialBars(
   const minExtra = Math.max(2, lenScale * minLen)
   const rot = spin * Math.PI * 2 * env.timeSec + (follow ? follow.spinRad * 0.15 : 0)
 
+  // 跟随圆形且圆形开了 3D 时：把每个绘制点映射进同一套单应性 → 环随圆一起透视变形。
+  // 投影作用于**已含平移+自转的 stage 坐标**（逐顶点，而非整层网格）→ 与圆形严格同构。
+  const fp = follow ? env.followProject : undefined
+  const P = (lx: number, ly: number): { x: number; y: number } => {
+    // lx/ly 为「圆心局部坐标」（未自转前的画幅坐标）→ 先转回 stage 空间再投影
+    const cos = Math.cos(rot)
+    const sin = Math.sin(rot)
+    const sx = cx + lx * cos - ly * sin
+    const sy = cy + lx * sin + ly * cos
+    return fp ? fp(sx, sy) : { x: sx, y: sy }
+  }
+
   ctx.save()
   ctx.globalAlpha = env.opacity
-  ctx.translate(cx, cy)
-  ctx.rotate(rot)
 
   if (innerRing) {
+    // 内环近似为多边形（受投影后不再是正圆）；段数随半径自适应
+    const segs = Math.max(48, Math.min(180, Math.round(r0 * 0.6)))
     ctx.beginPath()
-    ctx.arc(0, 0, r0, 0, Math.PI * 2)
+    for (let i = 0; i <= segs; i++) {
+      const a = (i / segs) * Math.PI * 2
+      const p = P(Math.cos(a) * r0, Math.sin(a) * r0)
+      if (i === 0) ctx.moveTo(p.x, p.y)
+      else ctx.lineTo(p.x, p.y)
+    }
     ctx.strokeStyle = mixColor(colorA, '#ffffff', 0.15)
     ctx.globalAlpha = env.opacity * 0.55
     ctx.lineWidth = 2
@@ -71,19 +88,16 @@ export function drawRadialBars(
       ctx.shadowBlur = 12 * glow
     }
     ctx.fillStyle = col
-    const x0 = Math.cos(a - half) * r0
-    const y0 = Math.sin(a - half) * r0
-    const x1 = Math.cos(a - half) * (r0 + len)
-    const y1 = Math.sin(a - half) * (r0 + len)
-    const x2 = Math.cos(a + half) * (r0 + len)
-    const y2 = Math.sin(a + half) * (r0 + len)
-    const x3 = Math.cos(a + half) * r0
-    const y3 = Math.sin(a + half) * r0
+    // 4 个角先算局部坐标，再统一投影 → 投影后仍是四边形（直线保持性）
+    const p0 = P(Math.cos(a - half) * r0, Math.sin(a - half) * r0)
+    const p1 = P(Math.cos(a - half) * (r0 + len), Math.sin(a - half) * (r0 + len))
+    const p2 = P(Math.cos(a + half) * (r0 + len), Math.sin(a + half) * (r0 + len))
+    const p3 = P(Math.cos(a + half) * r0, Math.sin(a + half) * r0)
     ctx.beginPath()
-    ctx.moveTo(x0, y0)
-    ctx.lineTo(x1, y1)
-    ctx.lineTo(x2, y2)
-    ctx.lineTo(x3, y3)
+    ctx.moveTo(p0.x, p0.y)
+    ctx.lineTo(p1.x, p1.y)
+    ctx.lineTo(p2.x, p2.y)
+    ctx.lineTo(p3.x, p3.y)
     ctx.closePath()
     ctx.fill()
     ctx.shadowBlur = 0

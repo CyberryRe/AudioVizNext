@@ -21,12 +21,12 @@ import { resolveTimeline, type Clip, type Project } from '../model/timeline'
 import { mediaBox } from '../pixi/layout'
 import { drawTextLayer } from './drawTextLayer'
 import { loadImageBitmaps, imageForFrame, type LoadedImage } from './loadImageBitmaps'
-import { findFollowCircle } from '../presets/followCircle'
+import { findFollowCircle, followProjection } from '../presets/followCircle'
 import { avnUrl, evenUp, pathFromAvn, type ExportProgress } from './exportTypes'
 import { getPreset, drawPreset, installUserPresetMetas } from '../presets/registry'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 import { resolveLayer3D, affineAt, isLayer3DActive, projectStagePoint, type ResolvedLayer3D } from '../pixi/layer3d'
-import type { PresetImage } from '../presets/types'
+import { bool as boolParam, type PresetImage } from '../presets/types'
 
 export interface WorkerAudioMix {
   sampleRate: number
@@ -179,8 +179,16 @@ function renderFrame(
         const b = images.get(src)
         return b ? { width: b.width, height: b.height } : null
       })
+      // ⚠ 只有**真正声明并开启跟随**的非图片层才是跟随方：
+      //   ① 圆形图片层自身会命中自己 → 按 kind 排除，否则它自己的 3D 被误抑制；
+      //   ② 效果层也可能带 layer3d 但不消费 followProject → 按「预设声明 followCircle 且值为真」判定。
+      const declaresFollow = meta.params.some((p) => p.key === 'followCircle')
+      const isFollower = l.kind !== 'image' && declaresFollow && boolParam(l.params ?? {}, meta, 'followCircle')
+      const followProject = isFollower ? followProjection(followCircle, { width: w, height: h }) : undefined
       const l3cfg = resolveLayer3D(l.layer3d, project.stage, { x: 0, y: 0, w, h })
-      const use3d = isLayer3DActive(l.layer3d) && l3cfg.enabled
+      // 跟随圆形时：环的 3D 已在 drawer 内逐点施加（followProject）→ 该层自身 3D 不再叠加
+      // （用户约定「无脑跟随」：跟随态下忽略环形层自己的四角设置）。
+      const use3d = !followProject && isLayer3DActive(l.layer3d) && l3cfg.enabled
       ctx.save()
       if (use3d) {
         // 全幅预设 3D：先整层画到临时画布，再按细分网格逐格贴回（与预览同一投影，无折痕）。
@@ -201,7 +209,8 @@ function renderFrame(
             images: resolvedPresetImages(),
             keyframes: l.keyframes,
             tRel: l.tRel ?? 0,
-            followCircle
+            followCircle,
+            followProject
           }, l.params)
           ctx.globalAlpha = l.opacity
           drawProjectedGrid(ctx, tmp, { x: 0, y: 0, w, h }, l3cfg, LAYER3D_GRID_SEG)
@@ -221,7 +230,8 @@ function renderFrame(
           images: resolvedPresetImages(),
           keyframes: l.keyframes,
           tRel: l.tRel ?? 0,
-          followCircle
+          followCircle,
+          followProject
         }, l.params)
       }
       ctx.restore()

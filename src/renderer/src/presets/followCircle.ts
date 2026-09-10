@@ -6,6 +6,7 @@ import type { Project } from '../model/timeline'
 import type { FollowCircle, PresetMeta } from './types'
 import { getPreset } from './registry'
 import { num, str } from './types'
+import { resolveLayer3D, projectStagePoint, isLayer3DActive } from '../pixi/layer3d'
 
 /** 与 drawers/imageShape.baseBox 同口径 */
 function circleFromImageClip(
@@ -14,6 +15,7 @@ function circleFromImageClip(
     presetId?: string
     params?: Record<string, unknown>
     transform?: { x?: number; y?: number; scaleX?: number; scaleY?: number }
+    layer3d?: import('../pixi/layer3d').Layer3DStyle
   },
   imgW: number,
   imgH: number,
@@ -46,7 +48,15 @@ function circleFromImageClip(
   const spin = num(clip.params ?? {}, meta, 'spin')
   const spinRad = (spin * 360 * timeSec * Math.PI) / 180
   void fps
-  return { x, y, radius: radius + Math.max(0, bw), spinRad }
+  return {
+    x,
+    y,
+    radius: radius + Math.max(0, bw),
+    spinRad,
+    // 内容盒（左上原点）——与 imageShape.baseBox 完全一致，供跟随方解析同一套 3D 单应性
+    box: { x: x - w / 2, y: y - h / 2, w, h },
+    layer3d: clip.layer3d
+  }
 }
 
 /**
@@ -70,7 +80,7 @@ export function findFollowCircle(
       const size = getImageSize(clip.src)
       if (!size || size.width < 1 || size.height < 1) continue
       const hit = circleFromImageClip(
-        { src: clip.src, presetId: clip.presetId, params: clip.params, transform: clip.transform },
+        { src: clip.src, presetId: clip.presetId, params: clip.params, transform: clip.transform, layer3d: clip.layer3d },
         size.width,
         size.height,
         stage,
@@ -81,4 +91,25 @@ export function findFollowCircle(
     }
   }
   return null
+}
+
+/**
+ * 构造「把 stage 坐标映射进被跟随圆形剪贴 3D 透视」的投影函数。
+ *
+ * 内容盒 = 圆形图片的内容盒（四角 layer3d 相对它归一化）；被跟随圆形未启用 3D 或缺少盒信息时
+ * 返回 **undefined**（调用方退回恒等，保持旧行为）。
+ *
+ * 预览（PixiRenderer）与导出（Worker）都调用**这一个函数** → 两端映射逐点一致 → 导出 ≡ 预览。
+ */
+export function followProjection(
+  follow: FollowCircle | null | undefined,
+  stage: { width: number; height: number }
+): ((x: number, y: number) => { x: number; y: number }) | undefined {
+  if (!follow || !follow.box || !isLayer3DActive(follow.layer3d)) return undefined
+  const cfg = resolveLayer3D(follow.layer3d, stage, follow.box)
+  if (!cfg.enabled) return undefined
+  return (x: number, y: number) => {
+    const p = projectStagePoint(x, y, cfg)
+    return { x: p.x, y: p.y }
+  }
 }

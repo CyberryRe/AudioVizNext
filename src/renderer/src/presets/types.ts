@@ -139,15 +139,40 @@ export interface PresetRenderEnv {
    * 由预览/导出从 scene 中第一个 circle 图片层算出；无则 null。
    */
   followCircle?: FollowCircle | null
+  /**
+   * 跟随圆形时，把 stage 坐标映射进「圆形图片的 3D 透视」的投影函数。
+   *
+   * = `projectStagePoint(x, y, resolveLayer3D(followCircle.layer3d, stage, followCircle.box))`
+   * 的预解析版本（由渲染方按被跟随圆形的盒子+layer3d 构造）。未跟随 / 圆形未启用 3D 时为 undefined
+   * → 调用方退回恒等（直接返回原坐标）。
+   *
+   * 为什么放在 env 而不是 drawer 自己算：**内容盒必须是「圆形图片盒」**（四角相对它归一化），
+   * drawer 只知 stage 尺寸，拿不到该盒；由渲染方（预览 PixiRenderer / 导出 Worker）统一构造
+   * → 预览与导出共用同一映射，保证「导出 ≡ 预览」。
+   */
+  followProject?: ((x: number, y: number) => { x: number; y: number }) | undefined
 }
 
-/** 可被可视化跟随的圆形图片几何（舞台像素坐标） */
+/**
+ * 可被可视化跟随的圆形图片几何（舞台像素坐标）。
+ *
+ * 除圆心/半径/盘面旋转外，还带出**被跟随圆形 clip 的 3D 状态**：
+ * 开启「跟随圆形」的层（如环形频谱）可用它把自身几何一并映射进同一套单应性，
+ * 从而与圆形图片的整体 3D 透视严格同构（环随圆一起被压扁/倾斜）。
+ */
 export interface FollowCircle {
   x: number
   y: number
   radius: number
   /** 盘面旋转角（弧度），与圆形预设 spin 一致 */
   spinRad: number
+  /**
+   * 圆形图片的内容盒（stage 像素，左上原点）——与 imageShape.baseBox 同口径。
+   * 四角 layer3d 就是相对**这个盒子**归一化的，跟随方必须用同一盒子解析才能对齐。
+   */
+  box?: { x: number; y: number; w: number; h: number }
+  /** 圆形 clip 的四角 3D 样式（未启用/未设时为 undefined） */
+  layer3d?: import('../pixi/layer3d').Layer3DStyle
 }
 
 export type PresetCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D

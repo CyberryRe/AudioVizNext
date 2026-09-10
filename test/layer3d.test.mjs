@@ -243,5 +243,58 @@ t('旧轴模型字段 → 四角（不崩、四角有效）', () => {
   for (const p of cfg.quad) ok(Number.isFinite(p.x) && Number.isFinite(p.y), '角坐标有限')
 })
 
+// ===== 跟随圆形图片的 3D 同构（环形频谱柱环境） =====
+// 语义：跟随方（环形频谱）把自身每个绘制点经「圆形图片的内容盒 + 圆形自己的 layer3d」
+// 投影一次 → 环与圆处于同一套单应性 = 严格同构（与 drawer 内 followProject 完全一致）。
+console.log('\n== 跟随圆形的 3D 同构 ==')
+t('同一「盒子+layer3d」下：盒四角 → 投影四角（同构充要）', () => {
+  const circleBox = { x: 420, y: 140, w: 800, h: 800 }
+  const corners = [{ x: -0.05, y: 0.1 }, { x: 0.95, y: -0.05 }, { x: 1.1, y: 0.95 }, { x: 0.0, y: 1.05 }]
+  const cfg = resolveLayer3D({ enabled: true, corners }, stage, circleBox)
+  // 盒四角（stage 像素）投影后必须恰好等于 quad（因为四角相对该盒归一化）
+  const boxPts = [
+    { x: circleBox.x, y: circleBox.y },
+    { x: circleBox.x + circleBox.w, y: circleBox.y },
+    { x: circleBox.x + circleBox.w, y: circleBox.y + circleBox.h },
+    { x: circleBox.x, y: circleBox.y + circleBox.h }
+  ]
+  for (let i = 0; i < 4; i++) {
+    const p = projectStagePoint(boxPts[i].x, boxPts[i].y, cfg)
+    close(p.x, cfg.quad[i].x, 1e-6, `角${i} x`)
+    close(p.y, cfg.quad[i].y, 1e-6, `角${i} y`)
+  }
+})
+
+t('圆形圆心 → 投影中心附近（跟随点与圆心同构，不漂移）', () => {
+  const circleBox = { x: 420, y: 140, w: 800, h: 800 }
+  const corners = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }] // 恒等
+  const cfg = resolveLayer3D({ enabled: true, corners }, stage, circleBox)
+  const cx = circleBox.x + circleBox.w / 2
+  const cy = circleBox.y + circleBox.h / 2
+  const p = projectStagePoint(cx, cy, cfg)
+  close(p.x, cx, 1e-6, '圆心 x（恒等应不动）')
+  close(p.y, cy, 1e-6, '圆心 y（恒等应不动）')
+})
+
+t('圆形未启用 3D → 投影恒等（调用方退回原坐标，行为不变）', () => {
+  const circleBox = { x: 100, y: 50, w: 640, h: 640 }
+  const cfg = resolveLayer3D({ enabled: false }, stage, circleBox)
+  eq(cfg.enabled, false, 'enabled')
+  const p = projectStagePoint(777, 333, cfg)
+  close(p.x, 777, 1e-12, 'x 恒等')
+  close(p.y, 333, 1e-12, 'y 恒等')
+})
+
+t('跟随方的点落在圆形盒外：仍按同一 H 外推（环可超出圆形边界）', () => {
+  const circleBox = { x: 420, y: 140, w: 800, h: 800 }
+  const corners = [{ x: 0, y: 0 }, { x: 0.8, y: 0.1 }, { x: 0.9, y: 1 }, { x: 0.1, y: 0.9 }]
+  const cfg = resolveLayer3D({ enabled: true, corners }, stage, circleBox)
+  // 圆外一点（比盒更靠右）→ 投影结果有限且仍在盒右侧（H 是整体映射，外推合理）
+  const outside = { x: circleBox.x + circleBox.w * 1.5, y: circleBox.y + circleBox.h / 2 }
+  const p = projectStagePoint(outside.x, outside.y, cfg)
+  ok(Number.isFinite(p.x) && Number.isFinite(p.y), '外推坐标有限')
+  ok(p.x > cfg.quad[0].x, '外推点应仍在左侧之外（单调向右）')
+})
+
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`)
 process.exit(fail === 0 ? 0 : 1)

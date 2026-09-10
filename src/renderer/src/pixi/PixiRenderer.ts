@@ -22,11 +22,11 @@ import { effectiveVideoSrc, initMediaProxy } from './mediaProxy'
 import { mediaBox, resolveTextRows, glowRadius, type TextRowDatum } from './layout'
 import { getPreset, drawPreset } from '../presets/registry'
 import { paramAt } from '../presets/keyframes'
-import { num as numParam } from '../presets/types'
+import { num as numParam, bool as boolParam } from '../presets/types'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 import type { PresetImage, PresetMeta } from '../presets/types'
 import { mapBlurRadius } from '../presets/drawers/gaussianBlur'
-import { findFollowCircle } from '../presets/followCircle'
+import { findFollowCircle, followProjection } from '../presets/followCircle'
 import { resolveLayer3D, affineAt, isLayer3DActive, planPerspectiveGrid, type Layer3DStyle, type ResolvedLayer3D } from './layer3d'
 import { decodeGif, isGifBytes, gifFrameIndex } from '../media/gif'
 
@@ -130,6 +130,11 @@ export class PixiRenderer {
   private _adjustColor: ColorMatrixFilter | null = null
   /** 预设层离屏画布缓存：同一 clip 复用一张画布 + 纹理，仅在内容 key 变化时重绘 */
   private _presetRenders = new Map<string, { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; tex: Texture; key: string }>()
+  /**
+   * 上一帧「跟随圆形且圆形启用 3D」的预设层 id 集合。
+   * 这类层的 3D 已由 drawer 逐点施加（env.followProject）→ 外层不再叠加自身 3D（避免双重变形）。
+   */
+  private _followProjectActive = new Set<string>()
   // initMediaProxy 返回的退订函数（销毁时调用）
   private _proxyUnsub: (() => void) | null = null
   // 当前是否已挂载 canvas
@@ -362,7 +367,10 @@ export class PixiRenderer {
           if (sp.texture !== tex) sp.texture = tex
           sp.alpha = l.opacity
           sp.zIndex = l.z
-          this.applySpriteBox3D(sp, l.id, 0, 0, project.stage.width, project.stage.height, l.layer3d, project.stage, false, l.opacity)
+          // 跟随圆形且圆形启用 3D：环的 3D 已在 drawer 内逐点施加 → 本层自身 3D 不再叠加
+          // （用户约定「无脑跟随」：跟随态下忽略环形层自己的四角设置，避免双重变形）。
+          const own3d = this._followProjectActive.has(l.id) ? undefined : l.layer3d
+          this.applySpriteBox3D(sp, l.id, 0, 0, project.stage.width, project.stage.height, own3d, project.stage, false, l.opacity)
         } else {
           sp.visible = false
           const meshHide = this.layer3dMeshes.get(l.id)
@@ -754,7 +762,27 @@ export class PixiRenderer {
       if (el && el.videoWidth >= 1) return { width: el.videoWidth, height: el.videoHeight }
       return null
     })
-    const key2 = `${key}|fc:${followCircle ? `${followCircle.x.toFixed(1)},${followCircle.y.toFixed(1)},${followCircle.radius.toFixed(1)}` : '-'}`
+    // 跟随圆形且圆形启用 3D 时，构造「映射进圆形 3D 透视」的投影函数（内容盒 = 圆形图片盒）。
+    // ⚠ 只有**真正声明了跟随**的非图片层才算跟随方：
+    //   ① 圆形图片层自身也会 findFollowCircle 命中自己 → 按 src 排除，否则它自己的 3D 被误抑制；
+    //   ② 效果层（高斯模糊等）也可能带 layer3d，但它不消费 followProject → 按「预设是否声明
+    //      followCircle 参数」判定，避免误抑制其自身 3D。
+    const declaresFollow = meta.params.some((p) => p.key === 'followCircle')
+    const isFollower = !l.src && declaresFollow && boolParam(l.params ?? {}, meta, 'followCircle')
+    const followProject = followCircle && isFollower
+      ? followProjection(followCircle, { width: w, height: h })
+      : undefined
+    // 记录给外层：该层 3D 已逐点施加 → 别再叠加自身 3D（缓存命中时也要更新，故放在 key 比较之前）
+    if (followProject) this._followProjectActive.add(l.id)
+    else this._followProjectActive.delete(l.id)
+    // ⚠ 缓存 key 必须含**圆形 3D 的全部定义参数**（盒子 + 四角）：用户拖圆的四角时 x/y/radius 不变，
+    //   仅含这些会让环的渲染结果被旧缓存憋住 → 环不跟随变形。故把 box + layer3d 一并入 key。
+    const fcKey = followCircle
+      ? `${followCircle.x.toFixed(1)},${followCircle.y.toFixed(1)},${followCircle.radius.toFixed(1)},` +
+        `${followCircle.box ? `${followCircle.box.x.toFixed(1)},${followCircle.box.y.toFixed(1)},${followCircle.box.w.toFixed(1)},${followCircle.box.h.toFixed(1)}` : '-'},` +
+        `${followProject ? JSON.stringify(followCircle.layer3d?.corners ?? null) : '-'}`
+      : '-'
+    const key2 = `${key}|fc:${fcKey}`
     if (rec.key === key2) return rec.tex
 
     rec.ctx.clearRect(0, 0, w, h)
@@ -772,7 +800,8 @@ export class PixiRenderer {
       images,
       keyframes: l.keyframes,
       tRel: l.tRel ?? 0,
-      followCircle
+      followCircle,
+      followProject
     }, l.params)
     rec.tex.source.update()
     rec.key = key2
