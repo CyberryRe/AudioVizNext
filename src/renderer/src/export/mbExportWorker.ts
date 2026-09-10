@@ -21,8 +21,9 @@ import { resolveTimeline, type Clip, type Project } from '../model/timeline'
 import { mediaBox } from '../pixi/layout'
 import { drawTextLayer } from './drawTextLayer'
 import { loadImageBitmaps } from './loadImageBitmaps'
+import { findFollowCircle } from '../presets/followCircle'
 import { avnUrl, evenUp, pathFromAvn, type ExportProgress } from './exportTypes'
-import { getPreset, drawPreset } from '../presets/registry'
+import { getPreset, drawPreset, installUserPresetMetas } from '../presets/registry'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 
 export interface WorkerAudioMix {
@@ -40,6 +41,8 @@ export interface WorkerStartMessage {
   outPath: string
   bitrate: number
   audio: WorkerAudioMix | null
+  /** 用户预设（含 script 源码）：Worker 无 window.api，须主线程序列化注入 */
+  userPresets?: unknown[]
 }
 
 type InMessage = WorkerStartMessage | { type: 'cancel' } | { type: 'writeDone'; id: number; ok: boolean }
@@ -111,6 +114,10 @@ function renderFrame(
     const meta = getPreset(l.presetId)
     if (meta) {
       if (frame === 0) log(`[Export] 预设层 ${l.presetId} params=${JSON.stringify(l.params ?? {})} kf=${Object.keys(l.keyframes ?? {}).length}`)
+      const followCircle = findFollowCircle(project, frame, (src) => {
+        const b = images.get(src)
+        return b ? { width: b.width, height: b.height } : null
+      })
       drawPreset(ctx, meta, {
         width: w,
         height: h,
@@ -124,7 +131,8 @@ function renderFrame(
         image: l.kind === 'image' ? (images.get(l.src) ?? null) : null,
         images,
         keyframes: l.keyframes,
-        tRel: l.tRel ?? 0
+        tRel: l.tRel ?? 0,
+        followCircle
       }, l.params)
       continue
     }
@@ -157,6 +165,11 @@ async function addAudioMix(source: mb.AudioSampleSource, audio: WorkerAudioMix):
 
 async function runExport(msg: WorkerStartMessage): Promise<void> {
   const { project, bitrate, audio } = msg
+  // 用户脚本预设：主线程序列化注入（Worker 无 window.api / userData）
+  if (msg.userPresets?.length) {
+    installUserPresetMetas(msg.userPresets)
+    log(`[Export] 已注入用户预设 ${msg.userPresets.length} 个`)
+  }
   const fps = project.fps || 30
   const w = evenUp(project.stage.width)
   const h = evenUp(project.stage.height)

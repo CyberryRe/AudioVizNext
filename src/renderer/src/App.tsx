@@ -8,7 +8,7 @@ import { useState, useMemo, useCallback, useEffect } from 'react'
 import type { Project, MediaAsset, Clip, Track, TrackZone } from './model/timeline'
 import { contentTotalFrames, type ExportProgress } from './export/exportTypes'
 import { runMbExport } from './export/mbExport'
-import { initPresetRegistry, presetCategories } from './presets/registry'
+import { initPresetRegistry, presetCategories, warmupUserScripts } from './presets/registry'
 import type { PresetMeta } from './presets/types'
 import {
   createDemoProject,
@@ -387,8 +387,17 @@ export default function App(): React.JSX.Element {
       if (res.error && res.error !== '已取消') window.alert(`导入预设失败：${res.error}`)
       return
     }
+    await initPresetRegistry()
+    // 第三方脚本：装完立刻编译自检，失败要可见（生态调试关键）
+    const warm = warmupUserScripts()
     setPresets(await initPresetRegistry())
-    window.alert(`已导入预设：${res.meta?.name ?? ''}`)
+    const name = res.meta?.name ?? res.meta?.id ?? ''
+    const fail = warm.failed.find((f) => f.id === res.meta?.id)
+    if (fail) {
+      window.alert(`已导入「${name}」，但脚本编译失败：\n${fail.error}\n\n可在效果控件中查看；或检查 implementation.source。`)
+    } else {
+      window.alert(`已导入预设：${name}${res.meta?.script ? '（脚本实现）' : ''}`)
+    }
   }, [])
 
   // ===== 操作：更新选中 clip 的变换参数（缩放/位置） =====

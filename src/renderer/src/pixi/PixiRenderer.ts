@@ -26,6 +26,7 @@ import { num as numParam } from '../presets/types'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 import type { PresetImage, PresetMeta } from '../presets/types'
 import { mapBlurRadius } from '../presets/drawers/gaussianBlur'
+import { findFollowCircle } from '../presets/followCircle'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
 interface Layer {
@@ -644,7 +645,16 @@ export class PixiRenderer {
     }
 
     const key = `${l.presetId}|${JSON.stringify(l.params ?? {})}|${frame}|${w}x${h}|${image ? 'i' : '-'}|${images.size}`
-    if (rec.key === key) return rec.tex
+    // 圆形图片跟随：环形柱状图等需要；随帧/工程变化
+    const followCircle = findFollowCircle(project, frame, (src) => {
+      const t = this.imageTextures.get(src)
+      if (t && t.width >= 1 && t.height >= 1) return { width: t.width, height: t.height }
+      const el = this.videoEls.get(src)
+      if (el && el.videoWidth >= 1) return { width: el.videoWidth, height: el.videoHeight }
+      return null
+    })
+    const key2 = `${key}|fc:${followCircle ? `${followCircle.x.toFixed(1)},${followCircle.y.toFixed(1)},${followCircle.radius.toFixed(1)}` : '-'}`
+    if (rec.key === key2) return rec.tex
 
     rec.ctx.clearRect(0, 0, w, h)
     drawPreset(rec.ctx, meta, {
@@ -658,10 +668,13 @@ export class PixiRenderer {
       audio: this._audioData,
       opacity: 1, // 层透明度由 sprite.alpha 施加（与导出的 alpha 相乘等价）
       image,
-      images
+      images,
+      keyframes: l.keyframes,
+      tRel: l.tRel ?? 0,
+      followCircle
     }, l.params)
     rec.tex.source.update()
-    rec.key = key
+    rec.key = key2
     return rec.tex
   }
 

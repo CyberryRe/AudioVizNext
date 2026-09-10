@@ -1,0 +1,168 @@
+{
+  "format": "avnpre",
+  "version": 1,
+  "createdBy": "AudioVizNext-demo",
+  "createdAt": "2026-09-10T09:37:47.239Z",
+  "preset": {
+    "format": "avnpreset",
+    "version": 1,
+    "id": "spectrum-bars",
+    "name": "频谱柱状图",
+    "category": "visualization",
+    "clipType": "visual",
+    "kind": "visual",
+    "drawer": "spectrum-bars",
+    "durationFrames": 300,
+    "color": "#2a9d8f",
+    "desc": "横置柱状频谱：柱体沿水平方向排列、高度随频谱起伏，支持镜像与双色。",
+    "params": [
+      {
+        "key": "posX",
+        "label": "位置 X",
+        "type": "number",
+        "group": "布局",
+        "min": -0.5,
+        "max": 0.5,
+        "step": 0.005,
+        "default": 0,
+        "percent": true
+      },
+      {
+        "key": "posY",
+        "label": "位置 Y",
+        "type": "number",
+        "group": "布局",
+        "min": -0.5,
+        "max": 0.5,
+        "step": 0.005,
+        "default": 0.18,
+        "percent": true
+      },
+      {
+        "key": "scaleX",
+        "label": "缩放 X",
+        "type": "number",
+        "group": "布局",
+        "min": 0.1,
+        "max": 4,
+        "step": 0.01,
+        "default": 1,
+        "link": "scaleY"
+      },
+      {
+        "key": "scaleY",
+        "label": "缩放 Y",
+        "type": "number",
+        "group": "布局",
+        "min": 0.1,
+        "max": 4,
+        "step": 0.01,
+        "default": 1,
+        "link": "scaleX"
+      },
+      {
+        "key": "barCount",
+        "label": "柱数量",
+        "type": "number",
+        "group": "柱体",
+        "min": 8,
+        "max": 128,
+        "step": 1,
+        "default": 48,
+        "keyframe": true
+      },
+      {
+        "key": "barGap",
+        "label": "柱间隙",
+        "type": "number",
+        "group": "柱体",
+        "min": 0,
+        "max": 0.8,
+        "step": 0.01,
+        "default": 0.35,
+        "percent": true
+      },
+      {
+        "key": "maxHeight",
+        "label": "最大高度",
+        "type": "number",
+        "group": "柱体",
+        "min": 0.1,
+        "max": 1,
+        "step": 0.01,
+        "default": 0.55,
+        "percent": true,
+        "keyframe": true
+      },
+      {
+        "key": "minHeight",
+        "label": "最小高度",
+        "type": "number",
+        "group": "柱体",
+        "min": 0,
+        "max": 0.2,
+        "step": 0.005,
+        "default": 0.02,
+        "percent": true
+      },
+      {
+        "key": "radius",
+        "label": "圆角",
+        "type": "number",
+        "group": "柱体",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 0.5,
+        "percent": true
+      },
+      {
+        "key": "gamma",
+        "label": "频谱增益",
+        "type": "number",
+        "group": "柱体",
+        "min": 0.4,
+        "max": 3,
+        "step": 0.05,
+        "default": 1.3
+      },
+      {
+        "key": "mirror",
+        "label": "上下镜像",
+        "type": "bool",
+        "group": "柱体",
+        "default": false
+      },
+      {
+        "key": "colorA",
+        "label": "颜色 A（低频）",
+        "type": "color",
+        "group": "颜色",
+        "default": "#3fe0ff"
+      },
+      {
+        "key": "colorB",
+        "label": "颜色 B（高频）",
+        "type": "color",
+        "group": "颜色",
+        "default": "#a29bfe"
+      },
+      {
+        "key": "glow",
+        "label": "辉光",
+        "type": "number",
+        "group": "颜色",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 0.45,
+        "percent": true
+      }
+    ],
+    "implementation": {
+      "type": "script",
+      "language": "js",
+      "source": "const tRel = env.tRel || 0\nconst n = Math.max(4, Math.round(api.paramAt(params, env.keyframes, 'barCount', tRel, 48)))\nconst gap = api.paramAt(params, env.keyframes, 'barGap', tRel, 0.35)\nconst maxH = api.paramAt(params, env.keyframes, 'maxHeight', tRel, 0.55)\nconst minH = api.paramAt(params, env.keyframes, 'minHeight', tRel, 0.02)\nconst crRatio = api.paramAt(params, env.keyframes, 'radius', tRel, 0.5)\nconst gamma = api.paramAt(params, env.keyframes, 'gamma', tRel, 1.3)\nconst glow = api.paramAt(params, env.keyframes, 'glow', tRel, 0.45)\nconst px = api.paramAt(params, env.keyframes, 'posX', tRel, 0)\nconst py = api.paramAt(params, env.keyframes, 'posY', tRel, 0.18)\nconst sx = api.paramAt(params, env.keyframes, 'scaleX', tRel, 1)\nconst sy = api.paramAt(params, env.keyframes, 'scaleY', tRel, 1)\nconst mirror = params.mirror === true\nconst colorA = params.colorA || '#3fe0ff'\nconst colorB = params.colorB || '#a29bfe'\nconst W = env.width\nconst H = env.height\nctx.save()\nctx.globalAlpha = env.opacity\nctx.translate(W / 2 + px * W, H / 2 + py * H)\nctx.scale(sx, sy)\nconst totalW = W * 0.92\nconst slot = totalW / n\nconst bw = Math.max(1, slot * (1 - gap))\nconst maxBar = H * maxH\nconst minBar = H * minH\nconst cr = Math.min(bw / 2, maxBar / 2) * crRatio\nfor (let i = 0; i < n; i++) {\n  const v = api.freqValue(env.audio, env.frame, i, n, gamma)\n  const bh = Math.max(minBar, v * maxBar)\n  const x = -totalW / 2 + i * slot + (slot - bw) / 2\n  const mix = n <= 1 ? 0 : i / (n - 1)\n  const col = api.mixColor(colorA, colorB, mix)\n  if (glow > 0.01) { ctx.shadowColor = col; ctx.shadowBlur = 14 * glow }\n  ctx.fillStyle = col\n  if (mirror) {\n    const hh = bh / 2\n    ctx.beginPath()\n    if (cr > 0.5) {\n      const rr = Math.min(cr, bw / 2, hh)\n      ctx.moveTo(x + rr, -hh)\n      ctx.arcTo(x + bw, -hh, x + bw, hh, rr)\n      ctx.arcTo(x + bw, hh, x, hh, rr)\n      ctx.arcTo(x, hh, x, -hh, rr)\n      ctx.arcTo(x, -hh, x + bw, -hh, rr)\n      ctx.closePath()\n    } else ctx.rect(x, -hh, bw, hh * 2)\n    ctx.fill()\n  } else {\n    ctx.beginPath()\n    if (cr > 0.5) {\n      const rr = Math.min(cr, bw / 2, bh)\n      ctx.moveTo(x + rr, -bh)\n      ctx.arcTo(x + bw, -bh, x + bw, 0, rr)\n      ctx.lineTo(x + bw, 0)\n      ctx.lineTo(x, 0)\n      ctx.arcTo(x, -bh, x + rr, -bh, rr)\n      ctx.closePath()\n    } else ctx.rect(x, -bh, bw, bh)\n    ctx.fill()\n  }\n  ctx.shadowBlur = 0\n}\nctx.restore()"
+    }
+  }
+}

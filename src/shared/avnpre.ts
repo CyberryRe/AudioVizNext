@@ -28,7 +28,7 @@ export const AVNPRE_VERSION = 1
 export const AVNPRE_MAX_ASSET_BYTES = 8 * 1024 * 1024
 
 /** 内置 drawer 白名单（与 presets/registry.ts 的 DRAWERS 对应；这里是导入侧的防御性校验） */
-export const KNOWN_DRAWERS = ['image-shape', 'particle-waveform', 'gaussian-blur'] as const
+export const KNOWN_DRAWERS = ['image-shape', 'particle-waveform', 'gaussian-blur', 'spectrum-bars', 'radial-bars'] as const
 
 /** 单份脚本实现的大小上限（字符数），防超大/混淆载荷 */
 export const AVNPRE_MAX_SCRIPT_CHARS = 256 * 1024
@@ -145,7 +145,7 @@ export function decodeAvnpre(text: string): AvnpreDecodeResult {
     if (!q || typeof q.key !== 'string' || typeof q.type !== 'string') {
       return { ok: false, error: 'preset.params 每项必须有 key 与 type' }
     }
-    if (!['number', 'color', 'bool', 'select', 'image'].includes(q.type)) {
+    if (!['number', 'color', 'bool', 'select', 'image', 'gradient'].includes(q.type)) {
       return { ok: false, error: `不支持的参数类型 "${q.type}"` }
     }
   }

@@ -14,6 +14,7 @@ import type { ExportResult } from '../../../main/export'
 import { contentTotalFrames, type ExportProgress } from './exportTypes'
 import { analyzePcm } from '../media/audioAnalysis'
 import type { WorkerAudioMix, WorkerStartMessage } from './mbExportWorker'
+import { listUserPresetsForExport } from '../presets/registry'
 
 export interface MbExportRequest {
   project: Project
@@ -157,7 +158,14 @@ export async function runMbExport(req: MbExportRequest): Promise<ExportResult> {
         finish({ ok: false, error: `导出 Worker 崩溃: ${e.message || 'unknown'}` })
       }
 
-      const start: WorkerStartMessage = { type: 'start', project, outPath, bitrate: req.bitrate ?? 20_000_000, audio }
+      const start: WorkerStartMessage = {
+        type: 'start',
+        project,
+        outPath,
+        bitrate: req.bitrate ?? 20_000_000,
+        audio,
+        userPresets: listUserPresetsForExport()
+      }
       const transfer: Transferable[] = audio ? [...audio.channels] : []
       if (audio?.analysis) {
         transfer.push(

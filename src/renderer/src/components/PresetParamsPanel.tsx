@@ -11,7 +11,7 @@
  */
 import { useMemo, useRef, useState } from 'react'
 import type { Clip, MediaAsset } from '../model/timeline'
-import type { PresetMeta, PresetParam, NumberParam } from '../presets/types'
+import type { PresetMeta, PresetParam, NumberParam, GradientValue, GradientParam } from '../presets/types'
 import { defaultParams } from '../presets/types'
 import {
   evaluateKeyframes, hasKeyframeNear, removeKeyframeNear, setKeyframe, setKeyframeEase,
@@ -19,6 +19,7 @@ import {
   type Keyframe, type KeyframeEase, type KeyframeTracks
 } from '../presets/keyframes'
 import MediaSlot from './MediaSlot'
+import { getScriptError } from '../presets/registry'
 
 interface Props {
   clip: Clip
@@ -198,8 +199,36 @@ export default function PresetParamsPanel({ clip, meta, getAsset, onSetParam, on
   const [curveKey, setCurveKey] = useState<string | null>(null)
   const [selKfT, setSelKfT] = useState<number | null>(null)
 
+  /** 按 borderStyle 互斥展示边框相关参数，避免面板臃肿 */
+  const borderStyle = String(params.borderStyle ?? 'vinyl')
+  const paramVisible = (p: PresetParam): boolean => {
+    // 仅对圆形边框相关 key 做条件显示；其它预设参数恒显示
+    const condKeys: Record<string, string[]> = {
+      borderColor: ['solid'],
+      borderTexture: ['texture'],
+      vinylBase: ['vinyl'],
+      vinylGroove: ['vinyl'],
+      vinylSheen: ['vinyl'],
+      colorVinyl: ['color-vinyl'],
+      colorVinylGroove: ['color-vinyl'],
+      colorVinylSheen: ['color-vinyl']
+    }
+    const need = condKeys[p.key]
+    if (need) {
+      if (params.borderStyle === undefined && p.key === 'borderColor') return true
+      if (params.borderStyle === undefined) return !need.includes('vinyl') && !need.includes('color-vinyl')
+      return need.includes(borderStyle)
+    }
+    // 跟随圆形图片开启时，隐藏手动布局（位置/半径），避免两套参数打架
+    if (params.followCircle === true && meta.params.some((x) => x.key === 'followCircle')) {
+      if (p.key === 'posX' || p.key === 'posY' || p.key === 'baseRadius') return false
+    }
+    return true
+  }
+
   const groups: { name: string; items: PresetParam[] }[] = []
   for (const p of meta.params) {
+    if (!paramVisible(p)) continue
     const name = p.group ?? '参数'
     const g = groups.find((x) => x.name === name)
     if (g) g.items.push(p)
@@ -359,6 +388,129 @@ export default function PresetParamsPanel({ clip, meta, getAsset, onSetParam, on
           </div>
         )
       }
+      case 'gradient': {
+        const spec = p as GradientParam
+        const g: GradientValue = (() => {
+          const raw = value as Partial<GradientValue> | undefined
+          const fb = spec.default
+          if (!raw || typeof raw !== 'object' || !Array.isArray(raw.stops) || raw.stops.length < 2) return fb
+          return {
+            type: raw.type === 'radial' ? 'radial' : 'linear',
+            angle: Number.isFinite(raw.angle) ? (raw.angle as number) : fb.angle,
+            stops: raw.stops.map((s) => ({ t: Math.min(1, Math.max(0, s.t)), color: s.color }))
+          }
+        })()
+        const emit = (next: GradientValue): void => onSetParam(p.key, next)
+        const css = `linear-gradient(${g.angle}deg, ${g.stops
+          .slice()
+          .sort((a, b) => a.t - b.t)
+          .map((s) => `${s.color} ${(s.t * 100).toFixed(1)}%`)
+          .join(', ')})`
+        return (
+          <div key={p.key} style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 12, color: '#bbb', marginBottom: 6 }}>{p.label}</div>
+            <div style={{ height: 18, borderRadius: 3, border: '1px solid #333', background: g.type === 'radial' ? `radial-gradient(circle, ${g.stops.map((s) => `${s.color} ${(s.t * 100).toFixed(1)}%`).join(', ')})` : css, marginBottom: 6 }} />
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, fontSize: 11, color: '#999' }}>
+              <select
+                value={g.type}
+                onChange={(e) => emit({ ...g, type: e.target.value === 'radial' ? 'radial' : 'linear' })}
+                style={{ ...numInputStyle, width: 72 }}
+              >
+                <option value="linear">线性</option>
+                <option value="radial">径向</option>
+              </select>
+              {g.type === 'linear' && (
+                <>
+                  <span>角度</span>
+                  <input
+                    type="number"
+                    min={-360}
+                    max={360}
+                    step={1}
+                    value={g.angle}
+                    onChange={(e) => emit({ ...g, angle: Number(e.target.value) || 0 })}
+                    style={{ ...numInputStyle, width: 56 }}
+                  />
+                  <span>°</span>
+                  <button
+                    type="button"
+                    style={{ ...btnStyle(), padding: '2px 6px' }}
+                    onClick={() => emit({ ...g, angle: (g.angle + 180) % 360 })}
+                    title="反转渐变方向"
+                  >
+                    反向
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                style={{ ...btnStyle(), padding: '2px 6px', marginLeft: 'auto' }}
+                disabled={g.stops.length <= 2}
+                onClick={() => {
+                  if (g.stops.length <= 2) return
+                  const next = g.stops.slice(0, -1)
+                  emit({ ...g, stops: next })
+                }}
+              >
+                −节点
+              </button>
+              <button
+                type="button"
+                style={{ ...btnStyle(), padding: '2px 6px' }}
+                onClick={() => {
+                  const sorted = g.stops.slice().sort((a, b) => a.t - b.t)
+                  const last = sorted[sorted.length - 1]
+                  const prev = sorted[sorted.length - 2] ?? { t: 0, color: last.color }
+                  const t = Math.min(1, (prev.t + last.t) / 2 + 0.15)
+                  emit({ ...g, stops: [...sorted, { t, color: last.color }] })
+                }}
+              >
+                +节点
+              </button>
+            </div>
+            {g.stops
+              .map((s, i) => ({ s, i }))
+              .sort((a, b) => a.s.t - b.s.t)
+              .map(({ s, i }) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <input
+                    type="color"
+                    value={/^#([0-9a-f]{6})$/i.test(s.color) ? s.color : '#ffffff'}
+                    onChange={(e) => {
+                      const stops = g.stops.map((x, j) => (j === i ? { ...x, color: e.target.value } : x))
+                      emit({ ...g, stops })
+                    }}
+                    style={{ width: 28, height: 20, background: 'transparent', border: '1px solid #333', borderRadius: 3, padding: 0 }}
+                  />
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={s.t}
+                    onChange={(e) => {
+                      const t = Number(e.target.value)
+                      const stops = g.stops.map((x, j) => (j === i ? { ...x, t } : x))
+                      emit({ ...g, stops })
+                    }}
+                    style={{ flex: 1, accentColor: '#2a7de1' }}
+                  />
+                  <span style={{ width: 36, fontSize: 10, color: '#888', textAlign: 'right' }}>{Math.round(s.t * 100)}%</span>
+                  <span
+                    title="删除此色标"
+                    onClick={() => {
+                      if (g.stops.length <= 2) return
+                      emit({ ...g, stops: g.stops.filter((_, j) => j !== i) })
+                    }}
+                    style={{ cursor: g.stops.length > 2 ? 'pointer' : 'not-allowed', color: g.stops.length > 2 ? '#c66' : '#555', fontSize: 12 }}
+                  >
+                    ×
+                  </span>
+                </div>
+              ))}
+          </div>
+        )
+      }
       case 'color':
         return (
           <Row key={p.key} label={p.label}>
@@ -414,10 +566,19 @@ export default function PresetParamsPanel({ clip, meta, getAsset, onSetParam, on
       <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>
         {meta.name}
         <span style={{ fontSize: 11, color: '#777', fontWeight: 400, marginLeft: 6 }}>
-          {meta.source === 'user' ? '（导入的预设）' : '（内置预设）'}
+          {meta.source === 'user' ? (meta.script ? '（第三方脚本）' : '（导入的预设）') : '（内置预设）'}
         </span>
       </div>
       {meta.desc && <div style={{ fontSize: 11, color: '#888', marginBottom: 12, lineHeight: 1.5 }}>{meta.desc}</div>}
+      {(() => {
+        const err = getScriptError(meta.id) ?? meta.scriptError
+        if (!err) return null
+        return (
+          <div style={{ fontSize: 11, color: '#ff8080', background: 'rgba(180,40,40,.15)', border: '1px solid #803030', borderRadius: 4, padding: '6px 8px', marginBottom: 10, lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>
+            脚本错误：{err}
+          </div>
+        )
+      })()}
 
       {meta.clipType === 'image' && (
         <>

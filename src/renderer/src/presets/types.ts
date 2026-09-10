@@ -9,7 +9,7 @@
  *    因此导入的预设必须引用内置 drawer id；未知 drawer 会被拒绝。
  */
 
-export type ParamType = 'number' | 'color' | 'bool' | 'select' | 'image'
+export type ParamType = 'number' | 'color' | 'bool' | 'select' | 'image' | 'gradient'
 
 interface ParamBase {
   /** 参数键（存进 clip.params） */
@@ -46,7 +46,21 @@ export interface SelectParam extends ParamBase {
 /** 引用工程素材库里的图片（存 src 字符串） */
 export interface ImageParam extends ParamBase { type: 'image'; default?: string }
 
-export type PresetParam = NumberParam | ColorParam | BoolParam | SelectParam | ImageParam
+/** 渐变色标 */
+export interface GradientStop { t: number; color: string }
+/** 渐变值（存入 clip.params；线性带角度，径向从中心向外） */
+export interface GradientValue {
+  type: 'linear' | 'radial'
+  /** 线性角度（度，0=向右，顺时针）；径向时忽略 */
+  angle: number
+  stops: GradientStop[]
+}
+export interface GradientParam extends ParamBase {
+  type: 'gradient'
+  default: GradientValue
+}
+
+export type PresetParam = NumberParam | ColorParam | BoolParam | SelectParam | ImageParam | GradientParam
 
 export interface PresetAsset {
   key: string
@@ -65,8 +79,12 @@ export interface PresetMeta {
   clipType: 'visual' | 'image' | 'effect'
   /** 拖拽落轨的轨道类型 */
   kind: 'visual' | 'image'
-  /** 内置绘制器 id（.avnpre 不允许自带代码） */
+  /** 内置绘制器 id（可作为 script 失败时的回退；纯 script 预设可为空串） */
   drawer: string
+  /** 第三方脚本源码（.avnpre implementation.script；导入后编译执行） */
+  script?: string
+  /** 最近一次脚本编译/运行错误（UI 展示；成功则为空） */
+  scriptError?: string | null
   durationFrames: number
   color?: string
   desc?: string
@@ -116,6 +134,20 @@ export interface PresetRenderEnv {
   keyframes?: import('./keyframes').KeyframeTracks
   /** clip 内相对进度 0..1（关键帧求值用） */
   tRel?: number
+  /**
+   * 同帧「圆形」图片预设的几何（环形柱状图等跟随用）。
+   * 由预览/导出从 scene 中第一个 circle 图片层算出；无则 null。
+   */
+  followCircle?: FollowCircle | null
+}
+
+/** 可被可视化跟随的圆形图片几何（舞台像素坐标） */
+export interface FollowCircle {
+  x: number
+  y: number
+  radius: number
+  /** 盘面旋转角（弧度），与圆形预设 spin 一致 */
+  spinRad: number
 }
 
 export type PresetCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
@@ -153,4 +185,59 @@ export function bool(params: Record<string, unknown>, meta: PresetMeta, key: str
   const spec = meta.params.find((p) => p.key === key) as BoolParam | undefined
   const raw = params[key]
   return typeof raw === 'boolean' ? raw : (spec?.default ?? false)
+}
+
+/** 渐变参数读取（非法结构回退 schema 默认值） */
+export function gradient(params: Record<string, unknown>, meta: PresetMeta, key: string): GradientValue {
+  const spec = meta.params.find((p) => p.key === key) as GradientParam | undefined
+  const fallback: GradientValue = spec?.default ?? {
+    type: 'linear',
+    angle: 0,
+    stops: [
+      { t: 0, color: '#ff6b6b' },
+      { t: 1, color: '#4ecdc4' }
+    ]
+  }
+  const raw = params[key] as Partial<GradientValue> | undefined
+  if (!raw || typeof raw !== 'object') return fallback
+  const type = raw.type === 'radial' ? 'radial' : 'linear'
+  const angle = Number.isFinite(raw.angle) ? (raw.angle as number) : fallback.angle
+  const stops = Array.isArray(raw.stops) && raw.stops.length >= 2
+    ? raw.stops
+        .filter((s) => s && typeof s.t === 'number' && typeof s.color === 'string')
+        .map((s) => ({ t: Math.min(1, Math.max(0, s.t)), color: s.color }))
+        .sort((a, b) => a.t - b.t)
+    : fallback.stops
+  if (stops.length < 2) return fallback
+  return { type, angle, stops }
+}
+
+/** 把 GradientValue 画到 Canvas（线性/径向）。预览与导出共用 → 像素一致。 */
+export function paintGradient(
+  ctx: PresetCtx,
+  g: GradientValue,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): CanvasGradient | string {
+  if (!g.stops.length) return g.stops[0]?.color ?? '#888'
+  if (g.type === 'radial') {
+    const cx = x + w / 2
+    const cy = y + h / 2
+    const r = Math.hypot(w, h) / 2
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r)
+    for (const s of g.stops) grad.addColorStop(s.t, s.color)
+    return grad
+  }
+  // 线性：角度（度）→ 单位向量，覆盖包围盒
+  const rad = ((g.angle % 360) * Math.PI) / 180
+  const dx = Math.cos(rad)
+  const dy = Math.sin(rad)
+  const cx = x + w / 2
+  const cy = y + h / 2
+  const half = (Math.abs(dx) * w + Math.abs(dy) * h) / 2
+  const grad = ctx.createLinearGradient(cx - dx * half, cy - dy * half, cx + dx * half, cy + dy * half)
+  for (const s of g.stops) grad.addColorStop(s.t, s.color)
+  return grad
 }

@@ -49,6 +49,15 @@ docs/*
 !docs/preset-authoring.md
 !docs/audio-algorithms.md
 
+# ===== AI 编码助手指令/敏感本地文档（不入库）=====
+AGENTS.md
+AGENTS.local.md
+CLAUDE.md
+CLAUDE.local.md
+.cursorrules
+.cursor/
+.github/copilot-instructions.md
+
 # ===== DeepSeek Harness（dsh）等 AI 编码助手本地产物（不入库）=====
 # dsh 会话 / 状态 / 缓存 / 临时文件可能落到仓库内，命名不可预期，按特征模式兜底忽略：
 #  - 目录（任意层级）：.dsh/、dsh/、dsh-*/、.dsh-*/

@@ -19,6 +19,8 @@ import { defaultParams } from './types'
 import { drawImageShape } from './drawers/imageShape'
 import { drawParticleWaveform } from './drawers/particleWaveform'
 import { drawGaussianBlur } from './drawers/gaussianBlur'
+import { drawSpectrumBars } from './drawers/spectrumBars'
+import { drawRadialBars } from './drawers/radialBars'
 import { evaluateKeyframes, paramAt, setKeyframe, removeKeyframeNear } from './keyframes'
 import { waveValue, freqValue, levelAt, onsetAt, isBeatFrame, birthFrameOf, WAVE_SAMPLES, FREQ_BINS } from '../media/audioAnalysis'
 import * as DSP from '../media/audioAlgorithms'
@@ -28,7 +30,9 @@ import { mixColor } from '../model/timeline'
 export const DRAWERS: Record<string, PresetDrawer> = {
   'image-shape': drawImageShape,
   'particle-waveform': drawParticleWaveform,
-  'gaussian-blur': drawGaussianBlur
+  'gaussian-blur': drawGaussianBlur,
+  'spectrum-bars': drawSpectrumBars,
+  'radial-bars': drawRadialBars
 }
 
 /** 暴露给第三方脚本的白名单 API（`api.xxx`） */
@@ -81,12 +85,13 @@ const registry = new Map<string, PresetMeta>()
 const scriptCache = new Map<string, { src: string; drawer: PresetDrawer | null; error?: string }>()
 
 function normalizeMeta(raw: unknown, source: 'builtin' | 'user'): PresetMeta | null {
-  const m = raw as PresetMeta | undefined
+  const m = raw as (PresetMeta & { script?: string }) | undefined
   if (!m || typeof m !== 'object') return null
   if (m.format !== 'avnpreset' || typeof m.id !== 'string' || !m.id) return null
   if (typeof m.name !== 'string' || !Array.isArray(m.params)) return null
   const hasDrawer = typeof m.drawer === 'string' && !!DRAWERS[m.drawer]
-  const hasScript = typeof (m as { script?: unknown }).script === 'string' && !!(m as { script?: string }).script
+  const hasScript = typeof m.script === 'string' && m.script.trim().length > 0
+  // 第三方生态：script 是一等公民；drawer 仅作内置实现或 script 失败时的回退
   if (!hasDrawer && !hasScript) {
     console.warn(`[Preset] ${m.id} 既无可用 drawer 也无 script → 跳过`)
     return null
@@ -95,46 +100,96 @@ function normalizeMeta(raw: unknown, source: 'builtin' | 'user'): PresetMeta | n
   const ct = m.clipType === 'visual' ? 'visual' : m.clipType === 'effect' ? 'effect' : 'image'
   return {
     ...m,
+    drawer: typeof m.drawer === 'string' ? m.drawer : '',
+    script: hasScript ? (m.script as string) : undefined,
     version: typeof m.version === 'number' ? m.version : 1,
     category: cat,
     clipType: ct,
     kind: m.kind === 'visual' ? 'visual' : 'image',
     durationFrames: typeof m.durationFrames === 'number' && m.durationFrames > 0 ? m.durationFrames : 150,
     params: m.params as PresetParam[],
-    source
+    source,
+    scriptError: null
   }
 }
 
-/** 编译预设自带脚本 → drawer。失败返回 null（并记录原因，不影响其他预设）。 */
+/** 记录脚本错误到 meta（UI 可读） */
+function setScriptError(id: string, error: string | null): void {
+  const m = registry.get(id)
+  if (m) m.scriptError = error
+}
+
+/**
+ * 编译预设自带脚本 → drawer。失败返回 null，并把原因写进 meta.scriptError。
+ * 第三方生态主路径：.avnpre 带 implementation.script，不改宿主代码即可扩展可视化。
+ */
 export function compileScript(meta: PresetMeta): PresetDrawer | null {
-  const src = (meta as { script?: string }).script
-  if (!src) return null
+  const src = meta.script
+  if (!src || !src.trim()) return null
   const hit = scriptCache.get(meta.id)
-  if (hit && hit.src === src) return hit.drawer
+  if (hit && hit.src === src) {
+    setScriptError(meta.id, hit.error ?? null)
+    return hit.drawer
+  }
   try {
-    // 脚本体即绘制体，作用域内提供 ctx/env/params/meta/api
+    // 脚本体即绘制体，作用域：ctx / env / params / meta / api（白名单）
     const fn = new Function(
       'ctx', 'env', 'params', 'meta', 'api',
       `"use strict";\n${src}\n`
     ) as (ctx: PresetCtx, env: PresetRenderEnv, params: Record<string, unknown>, meta: PresetMeta, api: PresetScriptApi) => void
-    const drawer: PresetDrawer = (ctx, env, params, m) => fn(ctx, env, params, m, PRESET_SCRIPT_API)
+    const drawer: PresetDrawer = (ctx, env, params, m) => {
+      try {
+        fn(ctx, env, params, m, PRESET_SCRIPT_API)
+      } catch (e) {
+        setScriptError(m.id, `运行时：${String((e as Error)?.message ?? e)}`)
+        throw e
+      }
+    }
     scriptCache.set(meta.id, { src, drawer })
-    console.log(`[Preset] 脚本实现已编译：${meta.id}`)
+    setScriptError(meta.id, null)
+    console.log(`[Preset] 脚本已编译：${meta.id}`)
     return drawer
   } catch (e) {
     const error = String((e as Error)?.message ?? e)
     scriptCache.set(meta.id, { src, drawer: null, error })
+    setScriptError(meta.id, `编译失败：${error}`)
     console.warn(`[Preset] 脚本编译失败 ${meta.id}: ${error}`)
     return null
   }
 }
 
-/** 取某预设的实现（脚本优先，其次内置 drawer）。 */
+/**
+ * 实现优先级：**script（第三方）** → 内置 drawer（官方，或 script 失败时回退）。
+ */
 export function drawerFor(meta: PresetMeta | undefined): PresetDrawer | null {
   if (!meta) return null
   const script = compileScript(meta)
   if (script) return script
-  return DRAWERS[meta.drawer] ?? null
+  const builtin = meta.drawer ? DRAWERS[meta.drawer] : undefined
+  if (builtin) {
+    if (meta.script) console.warn(`[Preset] ${meta.id} 脚本不可用，回退内置 drawer「${meta.drawer}」`)
+    return builtin
+  }
+  return null
+}
+
+/** 脚本错误（无则 null）。效果控件红字提示用。 */
+export function getScriptError(id: string | undefined): string | null {
+  if (!id) return null
+  return registry.get(id)?.scriptError ?? null
+}
+
+/** 载入/导入后立刻编译全部用户脚本，返回成功/失败列表。 */
+export function warmupUserScripts(): { ok: string[]; failed: { id: string; error: string }[] } {
+  const ok: string[] = []
+  const failed: { id: string; error: string }[] = []
+  for (const m of registry.values()) {
+    if (m.source !== 'user' || !m.script) continue
+    const d = compileScript(m)
+    if (d) ok.push(m.id)
+    else failed.push({ id: m.id, error: m.scriptError || '未知错误' })
+  }
+  return { ok, failed }
 }
 
 /** 载入内置预设（幂等）。**模块加载即执行**——Worker 里也直接用 getPreset/drawPreset，不能依赖 App 调用初始化。 */
@@ -164,10 +219,28 @@ export async function refreshUserPresets(): Promise<void> {
   }
 }
 
+/**
+ * 把用户预设（含 script 源码）装进当前 registry。
+ * 导出 Worker 自身没有 window.api，由主线程序列化后 postMessage 进来调用。
+ */
+export function installUserPresetMetas(list: unknown[]): void {
+  for (const raw of list ?? []) {
+    const meta = normalizeMeta(raw, 'user')
+    if (meta) registry.set(meta.id, meta)
+    else console.warn('[Preset] 用户预设无效，已跳过')
+  }
+}
+
+/** 导出给 Worker：所有已注册的用户预设（含 script），保证导出=预览。 */
+export function listUserPresetsForExport(): PresetMeta[] {
+  return Array.from(registry.values()).filter((m) => m.source === 'user')
+}
+
 /** 初始化（App 启动时调一次）。 */
 export async function initPresetRegistry(): Promise<PresetMeta[]> {
   loadBuiltins()
   await refreshUserPresets()
+  warmupUserScripts()
   return listPresets()
 }
 
@@ -191,8 +264,16 @@ export function drawPreset(
   params: Record<string, unknown> | undefined
 ): void {
   const drawer = drawerFor(meta)
-  if (!drawer) return
-  drawer(ctx, env, presetOrDefaultParams(meta, params), meta)
+  if (!drawer) {
+    console.warn('[Preset] 无可用 drawer/script:', meta.id)
+    return
+  }
+  try {
+    drawer(ctx, env, presetOrDefaultParams(meta, params), meta)
+  } catch (e) {
+    // 脚本/绘制异常不得打断整帧渲染；打日志便于定位「预览空白」
+    console.error('[Preset] 绘制失败', meta.id, (e as Error)?.message ?? e)
+  }
 }
 
 /** 由预设生成「效果面板」的分类结构（与基础素材模板合并，见 App.tsx）。 */

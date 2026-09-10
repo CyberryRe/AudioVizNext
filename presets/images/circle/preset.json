@@ -9,17 +9,51 @@
   "drawer": "image-shape",
   "durationFrames": 150,
   "color": "#2a7a8a",
-  "desc": "把绑定的图片裁成圆形，可加边框纹理并持续旋转。",
+  "desc": "把绑定的图片裁成圆形；边框支持纯色 / 黑胶 / 彩胶（可渐变）/ 自定义纹理。默认图片随 spin 旋转，边框不转。",
   "params": [
     { "key": "shape", "label": "形状", "type": "select", "group": "形状", "options": [{ "value": "circle", "label": "圆形" }], "default": "circle" },
     { "key": "posX", "label": "位置 X", "type": "number", "group": "布局", "min": -0.5, "max": 0.5, "step": 0.005, "default": 0, "percent": true },
     { "key": "posY", "label": "位置 Y", "type": "number", "group": "布局", "min": -0.5, "max": 0.5, "step": 0.005, "default": 0, "percent": true },
     { "key": "scaleX", "label": "缩放 X", "type": "number", "group": "布局", "min": 0.1, "max": 4, "step": 0.01, "default": 1 },
     { "key": "scaleY", "label": "缩放 Y", "type": "number", "group": "布局", "min": 0.1, "max": 4, "step": 0.01, "default": 1, "link": "scaleX" },
+    {
+      "key": "borderStyle",
+      "label": "边框样式",
+      "type": "select",
+      "group": "边框",
+      "options": [
+        { "value": "vinyl", "label": "黑胶" },
+        { "value": "color-vinyl", "label": "彩胶" },
+        { "value": "solid", "label": "纯色描边" },
+        { "value": "texture", "label": "自定义纹理" },
+        { "value": "none", "label": "无" }
+      ],
+      "default": "vinyl"
+    },
+    { "key": "borderWidth", "label": "边框宽度", "type": "number", "group": "边框", "min": 0, "max": 0.35, "step": 0.005, "default": 0.12, "percent": true },
+    { "key": "borderColor", "label": "描边色", "type": "color", "group": "边框", "default": "#8fe9ff" },
     { "key": "borderTexture", "label": "边框纹理", "type": "image", "group": "边框", "default": "" },
-    { "key": "borderWidth", "label": "边框宽度", "type": "number", "group": "边框", "min": 0, "max": 0.2, "step": 0.002, "default": 0.03, "percent": true },
-    { "key": "borderColor", "label": "边框颜色", "type": "color", "group": "边框", "default": "#8fe9ff" },
+    { "key": "vinylBase", "label": "黑胶底色", "type": "color", "group": "黑胶", "default": "#111111" },
+    { "key": "vinylGroove", "label": "沟槽强度", "type": "number", "group": "黑胶", "min": 0, "max": 1, "step": 0.01, "default": 0.7, "percent": true },
+    { "key": "vinylSheen", "label": "高光", "type": "number", "group": "黑胶", "min": 0, "max": 1, "step": 0.01, "default": 0.45, "percent": true },
+    {
+      "key": "colorVinyl",
+      "label": "彩胶渐变",
+      "type": "gradient",
+      "group": "彩胶",
+      "default": {
+        "type": "linear",
+        "angle": 45,
+        "stops": [
+          { "t": 0, "color": "#ff0055" },
+          { "t": 0.45, "color": "#ffcc00" },
+          { "t": 1, "color": "#00e5ff" }
+        ]
+      }
+    },
+    { "key": "colorVinylGroove", "label": "彩胶沟槽", "type": "number", "group": "彩胶", "min": 0, "max": 1, "step": 0.01, "default": 0.55, "percent": true },
+    { "key": "colorVinylSheen", "label": "彩胶高光", "type": "number", "group": "彩胶", "min": 0, "max": 1, "step": 0.01, "default": 0.35, "percent": true },
     { "key": "spin", "label": "旋转速度", "type": "number", "group": "动画", "min": -2, "max": 2, "step": 0.01, "default": 0.25, "unit": "圈/秒" },
-    { "key": "spinImage", "label": "图片随框旋转", "type": "bool", "group": "动画", "default": false }
+    { "key": "spinBorder", "label": "框随图片旋转", "type": "bool", "group": "动画", "default": false }
   ]
 }

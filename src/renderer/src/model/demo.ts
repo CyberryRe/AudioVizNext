@@ -97,7 +97,8 @@ export interface EffectTemplate {
  * 预设样式（presets/**）由 `presets/registry.presetCategories()` 生成，App 里两者合并。
  */
 export function createEffectCategories(): EffectCategory[] {
-  return [
+  // 只保留有真实落轨/编辑流程的模板；纯占位（图片填充/背景音乐/画外音）已删除
+  const cats: EffectCategory[] = [
     {
       id: 'video',
       name: '视频',
@@ -110,20 +111,10 @@ export function createEffectCategories(): EffectCategory[] {
       ]
     },
     {
-      id: 'image',
-      name: '图片',
-      icon: '▧',
-      items: [
-        { id: 'tpl-image-fill', name: '图片填充', kind: 'image', clipType: 'image', durationFrames: 30 * 4, color: '#7a4a9a' }
-      ]
-    },
-    {
       id: 'audio',
       name: '音频',
       icon: '♪',
       items: [
-        { id: 'tpl-audio-music', name: '背景音乐', kind: 'audio', clipType: 'audio', durationFrames: 30 * 8, color: '#2a7a3a' },
-        { id: 'tpl-audio-vo', name: '画外音', kind: 'audio', clipType: 'audio', durationFrames: 30 * 6, color: '#2a7a3a' },
         {
           id: 'tpl-audio-single', name: '单次播放', kind: 'audio', clipType: 'audio', durationFrames: 30 * 5, color: '#1e6a6a',
           clampToSource: true,
@@ -144,6 +135,7 @@ export function createEffectCategories(): EffectCategory[] {
       ]
     }
   ]
+  return cats.filter((c) => c.items.length > 0)
 }
 
 /** 由模板生成一个 clip（落到指定轨道；空素材位，src 为空直到关联素材）。 */
