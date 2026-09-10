@@ -4,6 +4,7 @@
  */
 import { useState } from 'react'
 import type { Clip, MediaAsset } from '../model/timeline'
+import { looksLikeGifName } from '../media/gifDetect'
 
 export default function MediaSlot({ clip, getAsset, onBind }: {
   clip: Clip
@@ -51,7 +52,10 @@ export default function MediaSlot({ clip, getAsset, onBind }: {
       {bound ? (
         <>
           <div style={{ color: '#eee', marginBottom: 3 }}>{boundName}</div>
-          <div style={{ fontSize: 11, color: '#777' }}>{bound.kind} · 已绑定</div>
+          <div style={{ fontSize: 11, color: '#777' }}>
+            {bound.kind} · 已绑定
+            {looksLikeGifName(bound.src) && <span style={{ color: '#19a8ff' }}> · GIF 动图</span>}
+          </div>
         </>
       ) : (
         <>

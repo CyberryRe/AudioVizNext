@@ -158,6 +158,7 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
             onSetParam={(key, value) => selectedClipId && onSetPresetParam(selectedClipId, key, value)}
             onSetKeyframes={(key, track) => selectedClipId && onSetClipKeyframes(selectedClipId, key, track)}
             onBindAsset={(assetId) => selectedClipId && onBindAssetToClip(selectedClipId, assetId)}
+            onPatchClip={(patch) => selectedClipId && onUpdateClipParams(selectedClipId, patch)}
           />
         ) : isVideoLoop ? (
           <div>

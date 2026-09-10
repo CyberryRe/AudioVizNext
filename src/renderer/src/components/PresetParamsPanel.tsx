@@ -20,6 +20,7 @@ import {
 } from '../presets/keyframes'
 import MediaSlot from './MediaSlot'
 import { getScriptError } from '../presets/registry'
+import { looksLikeGifName } from '../media/gifDetect'
 
 interface Props {
   clip: Clip
@@ -29,8 +30,73 @@ interface Props {
   /** 写入某参数的关键帧轨道（整轨替换） */
   onSetKeyframes: (key: string, track: import('../presets/keyframes').Keyframe[]) => void
   onBindAsset: (assetId: string) => void
+  /** 更新 clip 的通用参数（如 GIF 速度） */
+  onPatchClip?: (patch: Partial<Clip>) => void
   /** 当前播放头帧（用于关键帧打点/求值） */
   frame: number
+}
+
+/**
+ * 滑块控件（数值输入 + 拖动条）。与 EffectControls 的 NumberSlider 同款；
+ * 这里复制一份以免两组件互相 import（Panel 被 EffectControls 引用，反向 import 会绕圈）。
+ */
+function NumberSlider({ label, value, min, max, step, onChange }: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  onChange: (v: number) => void
+}): React.JSX.Element {
+  const barRef = useRef<HTMLDivElement>(null)
+
+  const startDrag = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    const el = barRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const update = (clientX: number): void => {
+      const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
+      const raw = min + ratio * (max - min)
+      onChange(Math.round(raw / step) * step)
+    }
+    update(e.clientX)
+    const move = (ev: MouseEvent): void => update(ev.clientX)
+    const up = (): void => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
+  const pct = ((value - min) / (max - min)) * 100
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '64px 1fr 52px', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+      <span style={{ fontSize: 12, color: '#bbb' }}>{label}</span>
+      <div
+        ref={barRef}
+        onMouseDown={startDrag}
+        style={{ height: 12, background: '#111', border: '1px solid #333', borderRadius: 3, position: 'relative', cursor: 'ew-resize' }}
+      >
+        <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: '#2a6fa8', borderRadius: 3 }} />
+        <div style={{ position: 'absolute', left: `calc(${pct}% - 4px)`, top: -3, width: 8, height: 18, background: '#ccc', borderRadius: 2 }} />
+      </div>
+      <input
+        type="number"
+        value={Math.round(value * 100) / 100}
+        step={step}
+        min={min}
+        max={max}
+        onChange={(e) => {
+          const v = Number(e.target.value)
+          if (!Number.isNaN(v)) onChange(Math.max(min, Math.min(max, v)))
+        }}
+        style={{ ...numInputStyle, width: 52, textAlign: 'right', padding: '3px 5px' }}
+      />
+    </div>
+  )
 }
 
 function Row({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }): React.JSX.Element {
@@ -184,7 +250,7 @@ function KeyframeCurve({
   )
 }
 
-export default function PresetParamsPanel({ clip, meta, getAsset, onSetParam, onSetKeyframes, onBindAsset, frame }: Props): React.JSX.Element {
+export default function PresetParamsPanel({ clip, meta, getAsset, onSetParam, onSetKeyframes, onBindAsset, onPatchClip, frame }: Props): React.JSX.Element {
   const params = { ...defaultParams(meta), ...(clip.params ?? {}) }
   const kf: KeyframeTracks = clip.keyframes ?? {}
   // clip 内相对进度（关键帧打点/求值都基于它）
@@ -586,6 +652,25 @@ export default function PresetParamsPanel({ clip, meta, getAsset, onSetParam, on
           <MediaSlot clip={clip} getAsset={getAsset} onBind={onBindAsset} />
           <div style={{ marginBottom: 14 }} />
         </>
+      )}
+
+      {/* GIF 动画速度：仅当关联的是 GIF 素材时显示（静态图忽略该参数） */}
+      {looksLikeGifName(clip.src) && onPatchClip && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: '#cfcfcf', margin: '10px 0 8px' }}>GIF 动画</div>
+          <NumberSlider
+            label="速度"
+            value={clip.gifSpeed ?? 1}
+            min={0.25}
+            max={8}
+            step={0.25}
+            onChange={(v) => onPatchClip({ gifSpeed: v })}
+          />
+          <div style={{ fontSize: 10, color: '#777', lineHeight: 1.5 }}>
+            每个 GIF 帧占用 {Math.round((clip.gifSpeed ?? 1) * 100) / 100} 个时间轴帧
+            （1 = 一帧换一帧；越大越慢）。按时间轴帧驱动，导出 ≡ 预览。
+          </div>
+        </div>
       )}
 
       {groups.map((g) => (

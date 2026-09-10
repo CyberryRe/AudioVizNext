@@ -116,6 +116,12 @@ export interface Clip {
    * 投影数学见 `pixi/layer3d.ts`，预览与导出共用。
    */
   layer3d?: import('../pixi/layer3d').Layer3DStyle
+  /**
+   * GIF 动画速度：每个 GIF 帧占用多少个**时间轴帧**（默认 1 = 一帧换一帧）。
+   * 仅对 GIF 素材有效（静态图忽略）。预览与导出共用同一映射 → 导出 ≡ 预览。
+   * 例：30fps 时间轴 + gifSpeed=2 → GIF 每秒播 15 帧。
+   */
+  gifSpeed?: number
 
   // 标志
   locked?: boolean
@@ -219,6 +225,8 @@ interface ActiveClipBase {
   tRel?: number
   /** 泛用 3D 层变换（与 Clip.layer3d 同源） */
   layer3d?: import('../pixi/layer3d').Layer3DStyle
+  /** GIF 动画速度（每 GIF 帧占多少时间轴帧；见 Clip.gifSpeed） */
+  gifSpeed?: number
 }
 
 export interface ActiveVideoClip extends ActiveClipBase {
@@ -819,7 +827,8 @@ export function resolveTimeline(frame: number, project: Project): Scene {
         params: clip.params,
         keyframes: clip.keyframes,
         tRel: clip.durationFrames > 0 ? (frame - clip.startFrame) / clip.durationFrames : 0,
-        layer3d: clip.layer3d
+        layer3d: clip.layer3d,
+        gifSpeed: clip.gifSpeed
       }
 
       switch (clip.type) {

@@ -20,12 +20,13 @@ import * as mb from 'mediabunny'
 import { resolveTimeline, type Clip, type Project } from '../model/timeline'
 import { mediaBox } from '../pixi/layout'
 import { drawTextLayer } from './drawTextLayer'
-import { loadImageBitmaps } from './loadImageBitmaps'
+import { loadImageBitmaps, imageForFrame, type LoadedImage } from './loadImageBitmaps'
 import { findFollowCircle } from '../presets/followCircle'
 import { avnUrl, evenUp, pathFromAvn, type ExportProgress } from './exportTypes'
 import { getPreset, drawPreset, installUserPresetMetas } from '../presets/registry'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 import { resolveLayer3D, affineAt, isLayer3DActive, projectStagePoint, type ResolvedLayer3D } from '../pixi/layer3d'
+import type { PresetImage } from '../presets/types'
 
 export interface WorkerAudioMix {
   sampleRate: number
@@ -136,19 +137,33 @@ function renderFrame(
   h: number,
   clipById: Map<string, Clip>,
   clipCanvases: Map<string, CanvasImageSource & { width: number; height: number }>,
-  images: Map<string, ImageBitmap>,
+  images: Map<string, LoadedImage>,
   audioData: PresetAudioData | null
 ): void {
   const scene = resolveTimeline(frame, project)
   ctx.fillStyle = '#000'
   ctx.fillRect(0, 0, w, h)
 
+  // 预设参数引用的图片（静态，与时间轴帧无关）→ 预解析一次供 drawer 用。
+  // GIF 在此按「第 0 帧」解析（预设引用动图属边缘用法，与预览端 textureFor 兜底一致）。
+  let presetImages: Map<string, PresetImage> | null = null
+  const resolvedPresetImages = (): Map<string, PresetImage> => {
+    if (presetImages) return presetImages
+    const m = new Map<string, PresetImage>()
+    for (const [src, loaded] of images) {
+      const bmp = imageForFrame(loaded, 0)
+      if (bmp) m.set(src, bmp as unknown as PresetImage)
+    }
+    presetImages = m
+    return m
+  }
+
   const layers = [
-    ...scene.videos.map((v) => ({ kind: 'video' as const, id: v.id, src: v.src, opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d })),
-    ...scene.images.map((i) => ({ kind: 'image' as const, id: i.id, src: i.src, opacity: i.opacity, transform: i.transform, sourceFrame: i.sourceFrame, z: i.zIndex, content: '', presetId: i.presetId, params: i.params, keyframes: i.keyframes, tRel: i.tRel, layer3d: i.layer3d })),
-    ...scene.visuals.map((v) => ({ kind: 'visual' as const, id: v.id, src: '', opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d })),
-    ...scene.effects.map((v) => ({ kind: 'effect' as const, id: v.id, src: '', opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d })),
-    ...scene.texts.map((t) => ({ kind: 'text' as const, id: t.id, src: '', opacity: t.opacity, transform: t.transform, sourceFrame: t.sourceFrame, z: t.zIndex, content: t.content, presetId: t.presetId, params: t.params, keyframes: t.keyframes, tRel: t.tRel, layer3d: t.layer3d }))
+    ...scene.videos.map((v) => ({ kind: 'video' as const, id: v.id, src: v.src, opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d, gifSpeed: undefined as number | undefined })),
+    ...scene.images.map((i) => ({ kind: 'image' as const, id: i.id, src: i.src, opacity: i.opacity, transform: i.transform, sourceFrame: i.sourceFrame, z: i.zIndex, content: '', presetId: i.presetId, params: i.params, keyframes: i.keyframes, tRel: i.tRel, layer3d: i.layer3d, gifSpeed: i.gifSpeed })),
+    ...scene.visuals.map((v) => ({ kind: 'visual' as const, id: v.id, src: '', opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d, gifSpeed: undefined as number | undefined })),
+    ...scene.effects.map((v) => ({ kind: 'effect' as const, id: v.id, src: '', opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d, gifSpeed: undefined as number | undefined })),
+    ...scene.texts.map((t) => ({ kind: 'text' as const, id: t.id, src: '', opacity: t.opacity, transform: t.transform, sourceFrame: t.sourceFrame, z: t.zIndex, content: t.content, presetId: t.presetId, params: t.params, keyframes: t.keyframes, tRel: t.tRel, layer3d: t.layer3d, gifSpeed: undefined as number | undefined }))
   ].sort((a, b) => a.z - b.z)
 
   for (const l of layers) {
@@ -182,8 +197,8 @@ function renderFrame(
             energy: levelAt(audioData, frame),
             audio: audioData,
             opacity: 1,
-            image: l.kind === 'image' ? (images.get(l.src) ?? null) : null,
-            images,
+            image: l.kind === 'image' ? (resolvedPresetImages().get(l.src) ?? null) : null,
+            images: resolvedPresetImages(),
             keyframes: l.keyframes,
             tRel: l.tRel ?? 0,
             followCircle
@@ -202,8 +217,8 @@ function renderFrame(
           energy: levelAt(audioData, frame),
           audio: audioData,
           opacity: l.opacity,
-          image: l.kind === 'image' ? (images.get(l.src) ?? null) : null,
-          images,
+          image: l.kind === 'image' ? (resolvedPresetImages().get(l.src) ?? null) : null,
+          images: resolvedPresetImages(),
           keyframes: l.keyframes,
           tRel: l.tRel ?? 0,
           followCircle
@@ -212,8 +227,9 @@ function renderFrame(
       ctx.restore()
       continue
     }
-    const src: (CanvasImageSource & { width: number; height: number }) | undefined =
-      l.kind === 'video' ? clipCanvases.get(l.id) : images.get(l.src)
+    // 媒体层：视频走逐帧解码画布；图片（含 GIF）按当前源帧 + 速度取位图
+    const src: (CanvasImageSource & { width: number; height: number }) | undefined | null =
+      l.kind === 'video' ? clipCanvases.get(l.id) : imageForFrame(images.get(l.src), l.sourceFrame, l.gifSpeed ?? 1)
     if (!src) continue
     const rect = mediaBox(src.width, src.height, l.transform, { width: w, height: h })
     const box = { x: rect.x - rect.width / 2, y: rect.y - rect.height / 2, w: rect.width, h: rect.height }
@@ -378,7 +394,10 @@ async function runExport(msg: WorkerStartMessage): Promise<void> {
     post({ type: 'done', frames: perf.frames, wallMs: wall })
   } finally {
     for (const s of sinks.values()) { try { s.input.dispose?.() } catch { /* 忽略 */ } }
-    for (const b of images.values()) { try { b.close() } catch { /* 忽略 */ } }
+    for (const b of images.values()) {
+      // 仅 ImageBitmap 有 close()；GIF 是 OffscreenCanvas 数组（GC 回收）
+      if (b instanceof ImageBitmap) { try { b.close() } catch { /* 忽略 */ } }
+    }
   }
 }
 

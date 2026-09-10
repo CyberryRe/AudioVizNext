@@ -28,6 +28,7 @@ import type { PresetImage, PresetMeta } from '../presets/types'
 import { mapBlurRadius } from '../presets/drawers/gaussianBlur'
 import { findFollowCircle } from '../presets/followCircle'
 import { resolveLayer3D, affineAt, isLayer3DActive, planPerspectiveGrid, type Layer3DStyle, type ResolvedLayer3D } from './layer3d'
+import { decodeGif, isGifBytes, gifFrameIndex } from '../media/gif'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
 interface Layer {
@@ -48,6 +49,8 @@ interface Layer {
   tRel?: number
   /** clip.type==='image'：强制走图片管线（不靠扩展名猜，blob/编码路径也能命中） */
   isImage?: boolean
+  /** GIF 动画速度：每个 GIF 帧占用多少个时间轴帧（默认 1 = 一帧换一帧） */
+  gifSpeed?: number
   /** 泛用 3D 层变换（轴+消失点），任意可视 clip 可挂 */
   layer3d?: Layer3DStyle
 }
@@ -110,6 +113,8 @@ export class PixiRenderer {
   private imageLoading = new Map<string, Promise<void>>()
   // 图片纹理缓存：src → Texture（自管，不走 Assets——Assets 对 avn-file:// 自定义协议不稳）
   private imageTextures = new Map<string, Texture>()
+  /** GIF 动画帧纹理：src → 每帧一张 Texture（时间轴帧驱动选帧）；静态图不在此表 */
+  private gifFrames = new Map<string, Texture[]>()
   /** 3D 透视网格（四角投影，近大远小）；key = clip id */
   private layer3dMeshes = new Map<string, Mesh>()
   /** 媒体层当前帧的内容盒子（stage 像素，含中心 x/y 与宽高）——四角 3D HUD 用；key = clip id */
@@ -387,7 +392,7 @@ export class PixiRenderer {
         // 视频帧同步：把视频元素当作时间轴的"奴隶"，跟随目标源秒（帧→秒映射见 syncVideo 注释），
         // 绝不让它脱离时间轴自行循环播放。用 proxyEff(代理比原始更稳，Chromium 原生解码更可靠)。
         if (isVideo) this.syncVideo(proxyEff, l.sourceFrame, fps)
-        const tex = this.textureFor(proxyEff, isImage)
+        const tex = this.textureFor(proxyEff, isImage, l.sourceFrame, l.gifSpeed ?? 1)
         if (tex && sp.texture !== tex) sp.texture = tex
         // 就绪判定只认像素尺寸（v8 中 Texture 没有 `.valid` 属性；source resize 后 width/height 即真实像素数）
         const tReady = sp.texture && sp.texture.width >= 1 && sp.texture.height >= 1
@@ -774,12 +779,18 @@ export class PixiRenderer {
     return rec.tex
   }
 
-  /** 获取/复用纹理（视频返回 video 元素纹理；图片走自管缓存） */
-  private textureFor(src: string, forceImage = false): Texture | null {
+  /** 获取/复用纹理（视频返回 video 元素纹理；图片走自管缓存；GIF 返回对应帧纹理） */
+  private textureFor(src: string, forceImage = false, sourceFrame = 0, gifSpeed = 1): Texture | null {
     if (!src) return null
     if (forceImage || looksLikeImage(src)) {
       // 与导出 loadImageBitmaps 同路径：fetch + createImageBitmap。
       // Assets.load 对 avn-file:// 自定义协议不稳（CORS/Image 解码），曾致「导出有图、预览全无」。
+      const gif = this.gifFrames.get(src)
+      if (gif && gif.length > 0) {
+        // GIF 动画：时间轴帧驱动选帧（忽略 delay，按帧号直读）→ 预览 ≡ 导出
+        const idx = gifFrameIndex(sourceFrame, gif.length, gifSpeed)
+        return gif[idx]
+      }
       const existing = this.imageTextures.get(src)
       if (existing && existing.width >= 1 && existing.height >= 1) return existing
       if (!this.imageLoading.has(src)) {
@@ -852,6 +863,9 @@ export class PixiRenderer {
    * 异步加载图片纹理（带去重）。路径与导出 Worker 的 loadImageBitmaps 一致：
    * `fetch(src)` → blob → `createImageBitmap` → Pixi `ImageSource`/`Texture`。
    * 自定义协议 avn-file:// 已由主进程返回 ACAO:*，CSP connect-src 也放行。
+   *
+   * GIF 特例：`createImageBitmap` 对 GIF 只取首帧，故先嗅探是否 GIF，若是则用自研
+   * `decodeGif` 解出全部帧 → 每帧一张 Texture 存 `gifFrames`，由时间轴帧驱动选帧。
    */
   private loadImage(src: string): Promise<void> {
     const cached = this.imageLoading.get(src)
@@ -860,7 +874,33 @@ export class PixiRenderer {
       try {
         const res = await fetch(src)
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const bitmap = await createImageBitmap(await res.blob())
+        const blob = await res.blob()
+        const head = new Uint8Array(await blob.slice(0, 6).arrayBuffer())
+        if (isGifBytes(head)) {
+          const bytes = new Uint8Array(await blob.arrayBuffer())
+          const gif = decodeGif(bytes)
+          if (gif && gif.frames.length > 1) {
+            // 旧帧纹理回收（重导同一路径）
+            const old = this.gifFrames.get(src)
+            if (old) for (const t of old) { try { t.destroy(true) } catch { /* 忽略 */ } }
+            const texs: Texture[] = gif.frames.map((f) => {
+              const canvas = document.createElement('canvas')
+              canvas.width = gif.width
+              canvas.height = gif.height
+              const cctx = canvas.getContext('2d')
+              const imageData = new ImageData(f.data, gif.width, gif.height)
+              cctx?.putImageData(imageData, 0, 0)
+              const source = new ImageSource({ resource: canvas, width: gif.width, height: gif.height })
+              return new Texture({ source })
+            })
+            this.gifFrames.set(src, texs)
+            console.log(`[PixiRenderer] GIF decoded: ${gif.width}x${gif.height}, ${gif.frames.length} 帧 (时间轴帧驱动)`)
+            if (this._latestProject) this.render(this._latestFrame, this._latestProject, this._latestFps)
+            return
+          }
+          // 单帧 GIF 或解码失败 → 按静态图处理（继续走下面路径）
+        }
+        const bitmap = await createImageBitmap(blob)
         // 覆盖同 src 旧纹理（重导同一路径时避免泄漏）
         const prev = this.imageTextures.get(src)
         if (prev) {
@@ -1108,6 +1148,10 @@ export class PixiRenderer {
     this.textLayers.clear()
     for (const rec of this._presetRenders.values()) { try { rec.tex.destroy(true) } catch { /* 忽略 */ } }
     this._presetRenders.clear()
+    for (const frames of this.gifFrames.values()) {
+      for (const t of frames) { try { t.destroy(true) } catch { /* 忽略 */ } }
+    }
+    this.gifFrames.clear()
     for (const tex of this.imageTextures.values()) { try { tex.destroy(true) } catch { /* 忽略 */ } }
     this.imageTextures.clear()
     this.imageLoading.clear()
