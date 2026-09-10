@@ -11,7 +11,7 @@
  * 说明：Mask（输出画幅）与音频发声不属于 Pixi 视觉层，
  *  Mask 由外层 DOM 叠线框/暗角，音频由 <audio> 元素发声。
  */
-import { Application, Container, Sprite, Text, Texture, ImageSource, BlurFilter, Rectangle, RenderTexture, ColorMatrixFilter, type TextStyleFontWeight } from 'pixi.js'
+import { Application, Container, Sprite, Text, Texture, ImageSource, BlurFilter, Rectangle, RenderTexture, ColorMatrixFilter, Matrix, Mesh, MeshGeometry, type TextStyleFontWeight } from 'pixi.js'
 // CSP 不允许 unsafe-eval 时，需引入 unsafe-eval 模块做 side-effect：
 // 它覆盖渲染器的 _unsafeEvalCheck 并用避免 eval 的 polyfill 替代（Electron/Chrome 扩展等严格 CSP 环境）
 import 'pixi.js/unsafe-eval'
@@ -27,6 +27,7 @@ import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 import type { PresetImage, PresetMeta } from '../presets/types'
 import { mapBlurRadius } from '../presets/drawers/gaussianBlur'
 import { findFollowCircle } from '../presets/followCircle'
+import { resolveLayer3D, affineAt, isLayer3DActive, planPerspectiveGrid, offsetResolvedLayer3D, layer3DClipOffset, type Layer3DStyle, type ResolvedLayer3D } from './layer3d'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
 interface Layer {
@@ -47,9 +48,13 @@ interface Layer {
   tRel?: number
   /** clip.type==='image'：强制走图片管线（不靠扩展名猜，blob/编码路径也能命中） */
   isImage?: boolean
+  /** 泛用 3D 层变换（轴+消失点），任意可视 clip 可挂 */
+  layer3d?: Layer3DStyle
 }
 
 const STAGE = { width: 1920, height: 1080 }
+/** layer3d 透视网格细分段数（16×16=512 三角形/层，1080p 下开销可忽略，折痕不可见） */
+const LAYER3D_MESH_SEG = 16
 
 /**
  * 该 src 是否为图片（按扩展名/前缀判断；决定走图片管线 vs 视频纹理管线）。
@@ -70,8 +75,9 @@ function looksLikeImage(src: string): boolean {
   return /\.(png|jpe?g|gif|webp|bmp|svg)(\?|#|$)/.test(low)
 }
 
-/** 一行歌词的渲染槽（karaoke 滚动：当前句±N 行，每行独立 Text + 辉光副本） */
+/** 一行歌词的渲染槽：holder 承载 3D/2D 变换；Text 只负责字形（改字号不会冲掉变换） */
 interface KaraokeRow {
+  holder: Container
   main: Text
   glow: Text
   blur: BlurFilter
@@ -104,6 +110,8 @@ export class PixiRenderer {
   private imageLoading = new Map<string, Promise<void>>()
   // 图片纹理缓存：src → Texture（自管，不走 Assets——Assets 对 avn-file:// 自定义协议不稳）
   private imageTextures = new Map<string, Texture>()
+  /** 3D 透视网格（四角投影，近大远小）；key = clip id */
+  private layer3dMeshes = new Map<string, Mesh>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
   private _videoShown = new Set<string>()
   /** 音频分析数据（可视化预设用；由 Monitor 计算后 setAudioData 传入） */
@@ -345,14 +353,14 @@ export class PixiRenderer {
         const tex = this.renderPresetToTexture(l, presetMeta, frame, project, fps)
         if (tex) {
           if (sp.texture !== tex) sp.texture = tex
-          sp.anchor.set(0, 0)
-          sp.position.set(0, 0)
-          sp.width = project.stage.width
-          sp.height = project.stage.height
           sp.alpha = l.opacity
-          sp.visible = true
+          sp.zIndex = l.z
+          const fo = layer3DClipOffset(l.layer3d, project.stage, 'preset', l.transform, l.params)
+          this.applySpriteBox3D(sp, l.id, 0, 0, project.stage.width, project.stage.height, l.layer3d, project.stage, false, l.opacity, fo.dx, fo.dy)
         } else {
           sp.visible = false
+          const meshHide = this.layer3dMeshes.get(l.id)
+          if (meshHide) meshHide.visible = false
         }
         this.releaseText(l.id, liveIds)
         continue
@@ -407,15 +415,17 @@ export class PixiRenderer {
           // 纯布局函数 mediaBox（layout.ts）负责计算：媒体固定铺满画框高、只水平居中，
           // 宽按源宽高比自然得出。预览与导出共用同一函数 → 像素一致。详见 mediaBox 注释。
           const mb = mediaBox(sp.texture.width, sp.texture.height, l.transform, project.stage)
-          sp.width = mb.width
-          sp.height = mb.height
-          sp.anchor.set(mb.anchorX, mb.anchorY)
-          sp.position.set(mb.x, mb.y)
           sp.alpha = l.opacity
-          sp.visible = true
+          sp.zIndex = l.z
+          // 媒体中心已含 transform：轴/VP 跟随盒心相对 stage 中心的位移
+          const fdx = mb.x - project.stage.width / 2
+          const fdy = mb.y - project.stage.height / 2
+          this.applySpriteBox3D(sp, l.id, mb.x, mb.y, mb.width, mb.height, l.layer3d, project.stage, true, l.opacity, fdx, fdy)
         } else {
-          // 纹理未就绪（源尚未 resize 出尺寸）：隐藏精灵，避免显示默认 1x1 白块干扰判断；下一帧就绪后自动出现
+          // 纹理未就绪：隐藏精灵与可能的 3D mesh
           sp.visible = false
+          const meshHide = this.layer3dMeshes.get(l.id)
+          if (meshHide) meshHide.visible = false
         }
         // 移除残留文本（若曾是该 id 的文本层）
         this.releaseText(l.id, liveIds)
@@ -466,25 +476,101 @@ export class PixiRenderer {
         presetId: c.presetId,
         params: c.params,
         keyframes: c.keyframes,
-        tRel: c.tRel
+        tRel: c.tRel,
+        layer3d: c.layer3d
       }
     }
     if (c.type === 'visual' || c.type === 'effect') {
       return {
         id: c.id, isLyric: false, z: c.zIndex, src: '', opacity: c.opacity,
         sourceFrame: c.sourceFrame, transform: c.transform, content: '',
-        presetId: c.presetId, params: c.params, keyframes: c.keyframes, tRel: c.tRel
+        presetId: c.presetId, params: c.params, keyframes: c.keyframes, tRel: c.tRel,
+        layer3d: c.layer3d
       }
     }
     return {
       id: c.id, isLyric: false, z: c.zIndex, src: c.src, opacity: c.opacity,
       sourceFrame: c.sourceFrame, transform: c.transform, content: '',
       presetId: c.presetId, params: c.params, keyframes: c.keyframes, tRel: c.tRel,
-      isImage: c.type === 'image'
+      isImage: c.type === 'image',
+      layer3d: c.layer3d
     }
   }
 
   /** 音频分析数据（可视化预设的驱动信号；由 Monitor 计算后传入） */
+  /**
+   * 把精灵摆到 stage 上的盒子；启用 layer3d 时改用 **细分投影网格**（真透视曲面）。
+   *
+   * ⚠ 用 16×16 细分而非 4 角 quad：`s = focal/(focal+z)` 是非线性投影，只投影 4 个角
+   * 会在三角形内部线性插值 → 画面被折成两个平面（旋转越大折痕越明显）。
+   * ⚠ 本方法负责 visible/alpha：3D 时 sprite 隐藏、mesh 显示，调用方不要再写 sp.visible=true。
+   */
+  private applySpriteBox3D(
+    sp: Sprite,
+    clipId: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    layer3d: Layer3DStyle | undefined,
+    stage: { width: number; height: number },
+    centerAnchor: boolean,
+    opacity: number,
+    /** 额外偏移：让轴/VP 跟随 Clip 位移（相对 stage 中心） */
+    followDx = 0,
+    followDy = 0
+  ): void {
+    const cfg = offsetResolvedLayer3D(resolveLayer3D(layer3d, stage), followDx, followDy)
+    const tw = Math.max(1, sp.texture?.width || w)
+    const th = Math.max(1, sp.texture?.height || h)
+    const sx = w / tw
+    const sy = h / th
+    const use3d = isLayer3DActive(layer3d) && cfg.enabled
+
+    if (!use3d) {
+      const old = this.layer3dMeshes.get(clipId)
+      if (old) {
+        old.destroy()
+        this.layer3dMeshes.delete(clipId)
+      }
+      sp.visible = true
+      sp.alpha = opacity
+      if (centerAnchor) sp.anchor.set(0.5, 0.5)
+      else sp.anchor.set(0, 0)
+      sp.scale.set(sx, sy)
+      sp.skew.set(0, 0)
+      sp.rotation = 0
+      sp.position.set(x, y)
+      return
+    }
+
+    // 真透视曲面：16×16 细分网格（逐顶点投影，消除折痕）
+    const boxX = centerAnchor ? x - w / 2 : x
+    const boxY = centerAnchor ? y - h / 2 : y
+    const grid = planPerspectiveGrid({ x: boxX, y: boxY, w, h }, cfg, LAYER3D_MESH_SEG)
+    let mesh = this.layer3dMeshes.get(clipId)
+    const needRebuild = !mesh || mesh.texture !== sp.texture ||
+      mesh.geometry.getBuffer('aPosition')?.data?.length !== grid.positions.length
+    if (needRebuild) {
+      if (mesh) { mesh.destroy(); this.layer3dMeshes.delete(clipId) }
+      const geo = new MeshGeometry({ positions: grid.positions, uvs: grid.uvs, indices: grid.indices })
+      mesh = new Mesh({ geometry: geo, texture: sp.texture })
+      this.root!.addChild(mesh)
+      this.layer3dMeshes.set(clipId, mesh)
+    } else {
+      mesh!.geometry.positions = grid.positions
+      mesh!.geometry.uvs = grid.uvs
+    }
+    // 透视后三角形绕序可能翻转 → 必须关背面剔除，否则半幅被 culled
+    try {
+      mesh!.state.culling = false
+    } catch { /* 忽略 */ }
+    mesh!.zIndex = sp.zIndex
+    mesh!.alpha = opacity
+    mesh!.visible = true
+    sp.visible = false
+  }
+
   setAudioData(data: PresetAudioData | null): void {
     this._audioData = data
   }
@@ -864,36 +950,65 @@ export class PixiRenderer {
       s,
       project
     )
-    // 层容器：位置/透明度/旋转来自 layout 纯函数（design 归一化）
-    tl.root.position.set(tb.x, tb.y)
+    const cfg = resolveLayer3D(l.layer3d, project.stage)
+    const use3d = isLayer3DActive(l.layer3d) && cfg.enabled
+    // ⚠ 文本层不做「轴跟随」：行的投影输入点本身就用**绝对 stage 坐标**(tb.x+lx, tb.y+ly)，
+    //   轴也必须是绝对画幅坐标，两者才同一参照系。若在这里平移轴，输入点却仍是绝对值 →
+    //   内容相对轴的距离失真 → 透视形状漂移（与媒体/预设层同一类 BUG）。
+    const l3off = cfg
+    // 层容器：未做 3D 时沿用 layout 位置/旋转；3D 时改在 stage 空间逐行投影
+    if (use3d) {
+      tl.root.position.set(0, 0)
+      tl.root.rotation = 0
+    } else {
+      tl.root.position.set(tb.x, tb.y)
+      tl.root.rotation = tb.rotation
+    }
     tl.root.alpha = l.opacity
-    tl.root.rotation = tb.rotation
     const glowOn = tb.glowEnabled
 
-    // 行池复用：最多 MAX_ROWS 个槽位，逐槽更新；多余槽位隐藏
+    // 行池复用：holder 扛变换，Text 只改字形——高亮改 fontSize 不会冲掉 3D 矩阵
     while (tl.rows.length < Math.max(rows.length, 1)) {
+      const holder = new Container()
       const main = new Text({ text: '' })
       const glow = new Text({ text: '' })
       const blur = new BlurFilter({ strength: 1 })
       glow.filters = [blur]
       glow.zIndex = 0
       main.zIndex = 1
-      tl.root.addChild(glow)
-      tl.root.addChild(main)
-      tl.rows.push({ main, glow, blur, glowStrength: -1 })
+      holder.addChild(glow)
+      holder.addChild(main)
+      tl.root.addChild(holder)
+      tl.rows.push({ holder, main, glow, blur, glowStrength: -1 })
     }
     const slotCount = tl.rows.length
+    const rot = tb.rotation
     for (let slot = 0; slot < slotCount; slot++) {
       const slotRow = tl.rows[slot]
       const datum = rows[slot] as TextRowDatum | undefined
       if (!datum) {
-        slotRow.main.visible = false
-        slotRow.glow.visible = false
+        slotRow.holder.visible = false
         continue
       }
-      slotRow.main.visible = true
+      slotRow.holder.visible = true
       this.styleTextRow(slotRow.main, datum, tb)
-      // 辉光层（模糊副本）：强度 >0.01 才显示
+      if (use3d) {
+        // 局部 (0, d.y) 先经 2D rotateZ，再在 stage 上投影；矩阵打在 holder 上
+        const lx = -datum.y * Math.sin(rot)
+        const ly = datum.y * Math.cos(rot)
+        const m = affineAt(tb.x + lx, tb.y + ly, l3off)
+        slotRow.holder.setFromMatrix(new Matrix(m.a, m.b, m.c, m.d, m.e, m.f))
+        slotRow.main.position.set(0, 0)
+      } else {
+        slotRow.holder.position.set(0, 0)
+        slotRow.holder.scale.set(1, 1)
+        slotRow.holder.skew.set(0, 0)
+        slotRow.holder.rotation = 0
+        // 2D：容器在歌词中心，行内偏移用 position
+        slotRow.holder.position.set(0, 0)
+        // 用 holder 做行偏移（与旧逻辑一致：root 在 tb 中心，行 y 相对）
+        slotRow.main.position.set(0, datum.y)
+      }
       if (glowOn && datum.glow > 0.01) {
         this.styleTextRow(slotRow.glow, datum, tb)
         slotRow.glow.style.fill = tb.glowColor
@@ -902,6 +1017,11 @@ export class PixiRenderer {
           slotRow.blur.strength = radius
           slotRow.glowStrength = radius
         }
+        if (use3d) {
+          slotRow.glow.position.set(0, 0)
+        } else {
+          slotRow.glow.position.set(0, datum.y)
+        }
         slotRow.glow.visible = true
       } else {
         slotRow.glow.visible = false
@@ -909,7 +1029,7 @@ export class PixiRenderer {
     }
   }
 
-  /** 给一行 Text 套用样式、内容、位置（几何/换行宽度都来自 layout.ts 的 TextBox） */
+  /** 给一行 Text 套用样式、内容（位置由 applyText 决定：2D 或 layer3d 矩阵） */
   private styleTextRow(t: Text, d: TextRowDatum, tb: import('./layout').TextBox): void {
     t.text = d.text
     t.style.fill = d.color
@@ -920,9 +1040,7 @@ export class PixiRenderer {
     t.style.wordWrap = true
     t.style.wordWrapWidth = tb.wordWrapWidth
     t.style.align = tb.align
-    // 对齐锚点：左=左缘，右=右缘，中=中心
     t.anchor.set(tb.align === 'left' ? 0 : tb.align === 'right' ? 1 : 0.5, 0.5)
-    t.position.set(0, d.y)
     t.alpha = d.opacity
   }
 
@@ -942,6 +1060,9 @@ export class PixiRenderer {
   private retire(live: Set<string>): void {
     for (const [id, sp] of this.sprites) {
       if (!live.has(id)) { sp.destroy(); this.sprites.delete(id) }
+    }
+    for (const [id, mesh] of this.layer3dMeshes) {
+      if (!live.has(id)) { mesh.destroy(); this.layer3dMeshes.delete(id) }
     }
     for (const [id, tl] of this.textLayers) {
       if (!live.has(id)) { tl.root.destroy(); this.textLayers.delete(id) }
@@ -970,6 +1091,8 @@ export class PixiRenderer {
     this.videoTargetSec.clear()
     this.sprites.forEach((s) => s.destroy())
     this.sprites.clear()
+    this.layer3dMeshes.forEach((m) => m.destroy())
+    this.layer3dMeshes.clear()
     this.textLayers.forEach((tl) => tl.root.destroy())
     this.textLayers.clear()
     for (const rec of this._presetRenders.values()) { try { rec.tex.destroy(true) } catch { /* 忽略 */ } }

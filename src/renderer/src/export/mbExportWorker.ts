@@ -25,6 +25,7 @@ import { findFollowCircle } from '../presets/followCircle'
 import { avnUrl, evenUp, pathFromAvn, type ExportProgress } from './exportTypes'
 import { getPreset, drawPreset, installUserPresetMetas } from '../presets/registry'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
+import { resolveLayer3D, affineAt, isLayer3DActive, projectStagePoint, offsetResolvedLayer3D, layer3DClipOffset, type ResolvedLayer3D } from '../pixi/layer3d'
 
 export interface WorkerAudioMix {
   sampleRate: number
@@ -60,6 +61,51 @@ const post = (m: OutMessage, transfer?: Transferable[]): void => {
 const log = (line: string): void => post({ type: 'log', line })
 
 let cancelled = false
+
+/** layer3d 透视网格细分段数（与预览端 PixiRenderer.LAYER3D_MESH_SEG 保持一致，保证导出=预览） */
+const LAYER3D_GRID_SEG = 16
+
+/**
+ * 把源图按 layer3d 投影网格逐格贴到目标 2D 上下文。
+ *
+ * 逐格用「投影后四角 → 2D 仿射（u/v 基向量）」+ `drawImage` 绘制源矩形，
+ * 与预览端 Pixi Mesh 的细分网格同构（同段数、同投影）→ 导出与预览像素一致。
+ * box 为源图在 stage 空间的矩形（左上原点），源图像素尺寸由 src.width/height 提供。
+ */
+function drawProjectedGrid(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  src: CanvasImageSource & { width: number; height: number },
+  box: { x: number; y: number; w: number; h: number },
+  cfg: ResolvedLayer3D,
+  seg: number
+): void {
+  const n = Math.max(1, Math.min(64, Math.floor(seg)))
+  const tw = src.width
+  const th = src.height
+  const cellW = box.w / n
+  const cellH = box.h / n
+  const srcCellW = tw / n
+  const srcCellH = th / n
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const sx = box.x + cellW * c
+      const sy = box.y + cellH * r
+      const p00 = projectStagePoint(sx, sy, cfg)
+      const p10 = projectStagePoint(sx + cellW, sy, cfg)
+      const p01 = projectStagePoint(sx, sy + cellH, cfg)
+      // 仿射：u 基向量 = p10-p00，v 基向量 = p01-p00，原点 = p00
+      const a = p10.x - p00.x
+      const b = p10.y - p00.y
+      const cc = p01.x - p00.x
+      const dd = p01.y - p00.y
+      ctx.save()
+      ctx.setTransform(a, b, cc, dd, p00.x, p00.y)
+      // 目标格以 (0,0) 为左上 → 目标尺寸用「1 单位」= cellW/cellH（因为基向量已含缩放）
+      ctx.drawImage(src, c * srcCellW, r * srcCellH, srcCellW, srcCellH, 0, 0, cellW, cellH)
+      ctx.restore()
+    }
+  }
+}
 
 // —— 落盘 RPC：Worker 不能调 window.api，改由主线程代写 ——
 let writeSeq = 0
@@ -98,11 +144,11 @@ function renderFrame(
   ctx.fillRect(0, 0, w, h)
 
   const layers = [
-    ...scene.videos.map((v) => ({ kind: 'video' as const, id: v.id, src: v.src, opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel })),
-    ...scene.images.map((i) => ({ kind: 'image' as const, id: i.id, src: i.src, opacity: i.opacity, transform: i.transform, sourceFrame: i.sourceFrame, z: i.zIndex, content: '', presetId: i.presetId, params: i.params, keyframes: i.keyframes, tRel: i.tRel })),
-    ...scene.visuals.map((v) => ({ kind: 'visual' as const, id: v.id, src: '', opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel })),
-    ...scene.effects.map((v) => ({ kind: 'effect' as const, id: v.id, src: '', opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel })),
-    ...scene.texts.map((t) => ({ kind: 'text' as const, id: t.id, src: '', opacity: t.opacity, transform: t.transform, sourceFrame: t.sourceFrame, z: t.zIndex, content: t.content, presetId: t.presetId, params: t.params, keyframes: t.keyframes, tRel: t.tRel }))
+    ...scene.videos.map((v) => ({ kind: 'video' as const, id: v.id, src: v.src, opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d })),
+    ...scene.images.map((i) => ({ kind: 'image' as const, id: i.id, src: i.src, opacity: i.opacity, transform: i.transform, sourceFrame: i.sourceFrame, z: i.zIndex, content: '', presetId: i.presetId, params: i.params, keyframes: i.keyframes, tRel: i.tRel, layer3d: i.layer3d })),
+    ...scene.visuals.map((v) => ({ kind: 'visual' as const, id: v.id, src: '', opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d })),
+    ...scene.effects.map((v) => ({ kind: 'effect' as const, id: v.id, src: '', opacity: v.opacity, transform: v.transform, sourceFrame: v.sourceFrame, z: v.zIndex, content: '', presetId: v.presetId, params: v.params, keyframes: v.keyframes, tRel: v.tRel, layer3d: v.layer3d })),
+    ...scene.texts.map((t) => ({ kind: 'text' as const, id: t.id, src: '', opacity: t.opacity, transform: t.transform, sourceFrame: t.sourceFrame, z: t.zIndex, content: t.content, presetId: t.presetId, params: t.params, keyframes: t.keyframes, tRel: t.tRel, layer3d: t.layer3d }))
   ].sort((a, b) => a.z - b.z)
 
   for (const l of layers) {
@@ -118,31 +164,73 @@ function renderFrame(
         const b = images.get(src)
         return b ? { width: b.width, height: b.height } : null
       })
-      drawPreset(ctx, meta, {
-        width: w,
-        height: h,
-        frame,
-        fps: project.fps,
-        timeSec: l.sourceFrame / (project.fps || 30),
-        sourceFrame: l.sourceFrame,
-        energy: levelAt(audioData, frame),
-        audio: audioData,
-        opacity: l.opacity,
-        image: l.kind === 'image' ? (images.get(l.src) ?? null) : null,
-        images,
-        keyframes: l.keyframes,
-        tRel: l.tRel ?? 0,
-        followCircle
-      }, l.params)
+      const fo = layer3DClipOffset(l.layer3d, project.stage, 'preset', l.transform, l.params)
+      const l3cfg = offsetResolvedLayer3D(resolveLayer3D(l.layer3d, project.stage), fo.dx, fo.dy)
+      const use3d = isLayer3DActive(l.layer3d) && l3cfg.enabled
+      ctx.save()
+      if (use3d) {
+        // 全幅预设 3D：先整层画到临时画布，再按细分网格逐格贴回（与预览同一投影，无折痕）。
+        const tmp = new OffscreenCanvas(w, h)
+        const tctx = tmp.getContext('2d')
+        if (tctx) {
+          drawPreset(tctx, meta, {
+            width: w,
+            height: h,
+            frame,
+            fps: project.fps,
+            timeSec: l.sourceFrame / (project.fps || 30),
+            sourceFrame: l.sourceFrame,
+            energy: levelAt(audioData, frame),
+            audio: audioData,
+            opacity: 1,
+            image: l.kind === 'image' ? (images.get(l.src) ?? null) : null,
+            images,
+            keyframes: l.keyframes,
+            tRel: l.tRel ?? 0,
+            followCircle
+          }, l.params)
+          ctx.globalAlpha = l.opacity
+          drawProjectedGrid(ctx, tmp, { x: 0, y: 0, w, h }, l3cfg, LAYER3D_GRID_SEG)
+        }
+      } else {
+        drawPreset(ctx, meta, {
+          width: w,
+          height: h,
+          frame,
+          fps: project.fps,
+          timeSec: l.sourceFrame / (project.fps || 30),
+          sourceFrame: l.sourceFrame,
+          energy: levelAt(audioData, frame),
+          audio: audioData,
+          opacity: l.opacity,
+          image: l.kind === 'image' ? (images.get(l.src) ?? null) : null,
+          images,
+          keyframes: l.keyframes,
+          tRel: l.tRel ?? 0,
+          followCircle
+        }, l.params)
+      }
+      ctx.restore()
       continue
     }
     const src: (CanvasImageSource & { width: number; height: number }) | undefined =
       l.kind === 'video' ? clipCanvases.get(l.id) : images.get(l.src)
     if (!src) continue
     const rect = mediaBox(src.width, src.height, l.transform, { width: w, height: h })
+    const m3 = offsetResolvedLayer3D(
+      resolveLayer3D(l.layer3d, project.stage),
+      rect.x - w / 2,
+      rect.y - h / 2
+    )
     ctx.save()
     ctx.globalAlpha = l.opacity
-    ctx.drawImage(src, rect.x - rect.width / 2, rect.y - rect.height / 2, rect.width, rect.height)
+    if (isLayer3DActive(l.layer3d) && m3.enabled) {
+      // 细分网格透视：与预览端同构（同段数、同投影）→ 无折痕、导出=预览
+      const box = { x: rect.x - rect.width / 2, y: rect.y - rect.height / 2, w: rect.width, h: rect.height }
+      drawProjectedGrid(ctx, src, box, m3, LAYER3D_GRID_SEG)
+    } else {
+      ctx.drawImage(src, rect.x - rect.width / 2, rect.y - rect.height / 2, rect.width, rect.height)
+    }
     ctx.restore()
   }
 }

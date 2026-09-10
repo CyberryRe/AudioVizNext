@@ -5,6 +5,7 @@ import { formatTimecode } from '../model/demo'
 import { PixiRenderer } from '../pixi/PixiRenderer'
 import { computeAudioData } from '../media/audioAnalysis'
 import { initAudioBlob, resolvedAudioBlob, useAudioBlobTick } from '../media/audioBlob'
+import { resolveLayer3D, layer3DHud, isLayer3DActive, offsetResolvedLayer3D, layer3DClipOffset, planPerspectiveGrid } from '../pixi/layer3d'
 
 interface MonitorProps {
   project: Project
@@ -12,6 +13,8 @@ interface MonitorProps {
   isPlaying: boolean
   onPlay: (playing: boolean) => void
   onSeek: (frame: number) => void
+  /** 选中 clip（3D 调参时叠加轴/消失点 HUD） */
+  selectedClipId?: string | null
 }
 
 const FIT_OPTIONS = ['适合', '100%', '50%', '25%', '放大']
@@ -20,7 +23,7 @@ const FIT_OPTIONS = ['适合', '100%', '50%', '25%', '放大']
  * 中上：节目监视器 —— 预览画布 + 播放控制。
  * 用 resolveTimeline 纯函数解析当前帧 scene，并按 zIndex 渲染。
  */
-export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: MonitorProps): React.JSX.Element {
+export default function Monitor({ project, frame, isPlaying, onPlay, onSeek, selectedClipId }: MonitorProps): React.JSX.Element {
   const scene = resolveTimeline(frame, project)
   const fps = project.fps
   const { width, height } = project.stage
@@ -318,6 +321,72 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek }: M
               放在遮罩内部（而非外层整块预览区）才能让 Pixi 输出与遮罩/画幅严格对齐，
               否则会铺满整个预览区、明显大于遮罩且对不齐。 */}
           <div ref={pixiHostRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
+          {(() => {
+            if (!selectedClipId) return null
+            let sel: Clip | null = null
+            for (const clips of Object.values(project.clips)) {
+              const c = clips.find((x) => x.id === selectedClipId)
+              if (c) { sel = c; break }
+            }
+            if (!sel?.layer3d || !isLayer3DActive(sel.layer3d)) return null
+            // 预设层内容位移只来自 params.posX/posY；媒体/文本层来自 transform
+            const isPreset = !!sel.presetId
+            const fo = layer3DClipOffset(sel.layer3d, project.stage, isPreset ? 'preset' : 'media', sel.transform, sel.params)
+            const cfg = offsetResolvedLayer3D(resolveLayer3D(sel.layer3d, project.stage), fo.dx, fo.dy)
+            const hud = layer3DHud(cfg)
+            if (!hud) return null
+            const sx = maskW / project.stage.width
+            const sy = maskH / project.stage.height
+            // 平面轮廓 + 网格：变换前占满画幅的平面投影后的形态（直观看清被弯成什么形状）
+            const grid = planPerspectiveGrid(
+              { x: 0, y: 0, w: project.stage.width, h: project.stage.height },
+              cfg,
+              8
+            )
+            const cols = 8 + 1
+            const gridLines: React.JSX.Element[] = []
+            // 横线
+            for (let r = 0; r <= 8; r++) {
+              const a = grid.positions[(r * cols) * 2]
+              const b = grid.positions[(r * cols) * 2 + 1]
+              const c = grid.positions[(r * cols + 8) * 2]
+              const d = grid.positions[(r * cols + 8) * 2 + 1]
+              gridLines.push(
+                <line key={`h${r}`} x1={a * sx} y1={b * sy} x2={c * sx} y2={d * sy} stroke="#3dffa0" strokeWidth={0.6} opacity={0.28} />
+              )
+            }
+            // 竖线
+            for (let c0 = 0; c0 <= 8; c0++) {
+              const a = grid.positions[c0 * 2]
+              const b = grid.positions[c0 * 2 + 1]
+              const cc = grid.positions[(8 * cols + c0) * 2]
+              const dd = grid.positions[(8 * cols + c0) * 2 + 1]
+              gridLines.push(
+                <line key={`v${c0}`} x1={a * sx} y1={b * sy} x2={cc * sx} y2={dd * sy} stroke="#3dffa0" strokeWidth={0.6} opacity={0.28} />
+              )
+            }
+            const cornerPts = grid.corners.map((p) => `${p.x * sx},${p.y * sy}`).join(' ')
+            return (
+              <svg
+                width={maskW}
+                height={maskH}
+                style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 30 }}
+              >
+                {/* 变换后平面：网格 + 四角轮廓 */}
+                {gridLines}
+                <polygon points={cornerPts} fill="none" stroke="#3dffa0" strokeWidth={1.8} opacity={0.9} />
+                <line
+                  x1={hud.axis.x1 * sx} y1={hud.axis.y1 * sy}
+                  x2={hud.axis.x2 * sx} y2={hud.axis.y2 * sy}
+                  stroke="#3dffa0" strokeWidth={1.5} strokeDasharray="6 4" opacity={0.85}
+                />
+                <circle cx={hud.vp.x * sx} cy={hud.vp.y * sy} r={8} fill="none" stroke="#ffb020" strokeWidth={1.5} />
+                <line x1={hud.vp.x * sx - 12} y1={hud.vp.y * sy} x2={hud.vp.x * sx + 12} y2={hud.vp.y * sy} stroke="#ffb020" strokeWidth={1} />
+                <line x1={hud.vp.x * sx} y1={hud.vp.y * sy - 12} x2={hud.vp.x * sx} y2={hud.vp.y * sy + 12} stroke="#ffb020" strokeWidth={1} />
+                <text x={10} y={16} fill="#3dffa0" fontSize={10} fontFamily="sans-serif">轴 {Math.round(hud.angleDeg)}° / 转 {Math.round(hud.rotateDeg)}°</text>
+              </svg>
+            )
+          })()}
           {!pixiOn && (<>
           {/* 媒体内容层：完整显示原素材（objectFit:contain，绝不按遮罩比例裁剪），中心对齐画幅；可被变换移动 */}
           {mediaLayers.map((l, i) => {

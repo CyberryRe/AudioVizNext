@@ -15,7 +15,8 @@
     "test:avnpre": "node --experimental-strip-types test/avnpre.test.mjs",
     "test:keyframes": "node --experimental-strip-types test/keyframes.test.mjs",
     "test:audio": "node --experimental-strip-types test/audioAlgorithms.test.mjs",
-    "test": "npm run test:model && npm run test:avnpre && npm run test:keyframes && npm run test:audio"
+    "test:layer3d": "node --experimental-strip-types test/layer3d.test.mjs",
+    "test": "npm run test:model && npm run test:avnpre && npm run test:keyframes && npm run test:audio && npm run test:layer3d"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
