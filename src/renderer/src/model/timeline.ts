@@ -111,6 +111,11 @@ export interface Clip {
    * 求值 API 见 `presets/keyframes.ts`（预设 drawer 通过 `paramAt()` 取关键帧优先的值）。
    */
   keyframes?: import('../presets/keyframes').KeyframeTracks
+  /**
+   * 泛用 3D 层变换（四角单应性透视）。视频/图片/文本/可视化均可挂；
+   * 投影数学见 `pixi/layer3d.ts`，预览与导出共用。
+   */
+  layer3d?: import('../pixi/layer3d').Layer3DStyle
 
   // 标志
   locked?: boolean
@@ -212,6 +217,8 @@ interface ActiveClipBase {
   keyframes?: import('../presets/keyframes').KeyframeTracks
   /** clip 内相对进度 0..1（关键帧求值用；resolveTimeline 填） */
   tRel?: number
+  /** 泛用 3D 层变换（与 Clip.layer3d 同源） */
+  layer3d?: import('../pixi/layer3d').Layer3DStyle
 }
 
 export interface ActiveVideoClip extends ActiveClipBase {
@@ -811,7 +818,8 @@ export function resolveTimeline(frame: number, project: Project): Scene {
         presetId: clip.presetId,
         params: clip.params,
         keyframes: clip.keyframes,
-        tRel: clip.durationFrames > 0 ? (frame - clip.startFrame) / clip.durationFrames : 0
+        tRel: clip.durationFrames > 0 ? (frame - clip.startFrame) / clip.durationFrames : 0,
+        layer3d: clip.layer3d
       }
 
       switch (clip.type) {

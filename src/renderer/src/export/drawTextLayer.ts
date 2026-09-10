@@ -3,7 +3,7 @@
  *
  * 抽出来的原因：导出路径可能有多条，一旦各自实现一份文字排版，就必然出现「预览 ≠ 导出」的漂移。
  * 几何与字号全部来自 `layout.resolveTextRows`（与 Pixi 预览同源）；
- * 泛用 3D（轴+消失点）走 `pixi/layer3d.ts`，与预览同一投影。
+ * 泛用 3D（四角单应性）走 `pixi/layer3d.ts`，与预览同一投影。
  */
 import type { Clip, Project } from '../model/timeline'
 import { resolveTextRows, glowRadius } from '../pixi/layout'

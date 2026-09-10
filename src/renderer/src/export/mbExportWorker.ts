@@ -25,7 +25,7 @@ import { findFollowCircle } from '../presets/followCircle'
 import { avnUrl, evenUp, pathFromAvn, type ExportProgress } from './exportTypes'
 import { getPreset, drawPreset, installUserPresetMetas } from '../presets/registry'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
-import { resolveLayer3D, affineAt, isLayer3DActive, projectStagePoint, offsetResolvedLayer3D, layer3DClipOffset, type ResolvedLayer3D } from '../pixi/layer3d'
+import { resolveLayer3D, affineAt, isLayer3DActive, projectStagePoint, type ResolvedLayer3D } from '../pixi/layer3d'
 
 export interface WorkerAudioMix {
   sampleRate: number
@@ -64,13 +64,13 @@ let cancelled = false
 
 /** layer3d 透视网格细分段数（与预览端 PixiRenderer.LAYER3D_MESH_SEG 保持一致，保证导出=预览） */
 const LAYER3D_GRID_SEG = 16
-
 /**
  * 把源图按 layer3d 投影网格逐格贴到目标 2D 上下文。
  *
- * 逐格用「投影后四角 → 2D 仿射（u/v 基向量）」+ `drawImage` 绘制源矩形，
- * 与预览端 Pixi Mesh 的细分网格同构（同段数、同投影）→ 导出与预览像素一致。
- * box 为源图在 stage 空间的矩形（左上原点），源图像素尺寸由 src.width/height 提供。
+ * ⚠ 关键：`setTransform` 的基向量已含**全部**缩放（u 基向量 = 投影后格子的一条边）。
+ * 因此 drawImage 的目标矩形必须是**单位格 (0,0,1,1)**——基向量会把「1 单位」映射到投影后的格。
+ * 若像早期实现那样传 `cellW,cellH`（源空间格子像素），缩放会被重复施加 → 格子叠加错位 → 一团模糊色块。
+ * 源矩形按格子像素（`srcCellW/H`）切分，与预览端 Pixi Mesh 的 UV 插值同构。
  */
 function drawProjectedGrid(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -93,15 +93,15 @@ function drawProjectedGrid(
       const p00 = projectStagePoint(sx, sy, cfg)
       const p10 = projectStagePoint(sx + cellW, sy, cfg)
       const p01 = projectStagePoint(sx, sy + cellH, cfg)
-      // 仿射：u 基向量 = p10-p00，v 基向量 = p01-p00，原点 = p00
+      // 基向量 = 投影后该格的两条边（已含全部缩放）；原点 = 投影后左上角
       const a = p10.x - p00.x
       const b = p10.y - p00.y
       const cc = p01.x - p00.x
       const dd = p01.y - p00.y
       ctx.save()
       ctx.setTransform(a, b, cc, dd, p00.x, p00.y)
-      // 目标格以 (0,0) 为左上 → 目标尺寸用「1 单位」= cellW/cellH（因为基向量已含缩放）
-      ctx.drawImage(src, c * srcCellW, r * srcCellH, srcCellW, srcCellH, 0, 0, cellW, cellH)
+      // 目标用单位格 (0..1)：基向量把它映射到投影后的格子（切勿再传 cellW/cellH）
+      ctx.drawImage(src, c * srcCellW, r * srcCellH, srcCellW, srcCellH, 0, 0, 1, 1)
       ctx.restore()
     }
   }
@@ -164,8 +164,7 @@ function renderFrame(
         const b = images.get(src)
         return b ? { width: b.width, height: b.height } : null
       })
-      const fo = layer3DClipOffset(l.layer3d, project.stage, 'preset', l.transform, l.params)
-      const l3cfg = offsetResolvedLayer3D(resolveLayer3D(l.layer3d, project.stage), fo.dx, fo.dy)
+      const l3cfg = resolveLayer3D(l.layer3d, project.stage, { x: 0, y: 0, w, h })
       const use3d = isLayer3DActive(l.layer3d) && l3cfg.enabled
       ctx.save()
       if (use3d) {
@@ -217,16 +216,13 @@ function renderFrame(
       l.kind === 'video' ? clipCanvases.get(l.id) : images.get(l.src)
     if (!src) continue
     const rect = mediaBox(src.width, src.height, l.transform, { width: w, height: h })
-    const m3 = offsetResolvedLayer3D(
-      resolveLayer3D(l.layer3d, project.stage),
-      rect.x - w / 2,
-      rect.y - h / 2
-    )
+    const box = { x: rect.x - rect.width / 2, y: rect.y - rect.height / 2, w: rect.width, h: rect.height }
+    // 四角相对「内容盒子」→ 源矩形随内容移动，形状严格锁定（无需跟随偏移）
+    const m3 = resolveLayer3D(l.layer3d, project.stage, box)
     ctx.save()
     ctx.globalAlpha = l.opacity
     if (isLayer3DActive(l.layer3d) && m3.enabled) {
       // 细分网格透视：与预览端同构（同段数、同投影）→ 无折痕、导出=预览
-      const box = { x: rect.x - rect.width / 2, y: rect.y - rect.height / 2, w: rect.width, h: rect.height }
       drawProjectedGrid(ctx, src, box, m3, LAYER3D_GRID_SEG)
     } else {
       ctx.drawImage(src, rect.x - rect.width / 2, rect.y - rect.height / 2, rect.width, rect.height)

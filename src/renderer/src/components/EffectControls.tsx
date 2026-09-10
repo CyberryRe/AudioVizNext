@@ -3,6 +3,8 @@ import type { Project, Clip, MediaAsset } from '../model/timeline'
 import MediaSlot from './MediaSlot'
 import PresetParamsPanel from './PresetParamsPanel'
 import { getPreset } from '../presets/registry'
+import type { Layer3DStyle } from '../pixi/layer3d'
+import { defaultLayer3D } from '../pixi/layer3d'
 
 interface EffectControlsProps {
   selectedClipId: string | null
@@ -116,7 +118,15 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
     onUpdateClipParams(selectedClipId, { lyrics: { ...cur, ...patch } })
   }
 
+  const setLayer3D = (patch: Partial<Layer3DStyle>): void => {
+    if (!selectedClipId) return
+    const cur = selectedClip?.layer3d ?? {}
+    onUpdateClipParams(selectedClipId, { layer3d: { ...cur, ...patch } })
+  }
+
   const lyricStyle = selectedClip?.lyrics ?? {}
+  const layer3d = selectedClip?.layer3d ?? {}
+  const showLayer3D = !!selectedClip && selectedClip.type !== 'audio'
   const lyricAligns = [
     { v: 'left', label: '左对齐' },
     { v: 'center', label: '居中' },
@@ -245,14 +255,8 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
             <NumberSlider label="X 位置" value={lyricStyle.x ?? 0} min={-0.5} max={0.5} step={0.005} onChange={(v) => setLyrics({ x: v })} />
             <NumberSlider label="Y 位置" value={lyricStyle.y ?? 0} min={-0.5} max={0.5} step={0.005} onChange={(v) => setLyrics({ y: v })} />
             <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>歌词在画幅内移动，画幅（遮罩）固定不变。</div>
-
-            {/* 8. 3D 旋转（CSS 3D transform，透视图幅纵深） */}
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>3D 旋转</div>
-            <NumberSlider label="X 旋转" value={lyricStyle.rotateX ?? 0} min={-180} max={180} step={1} onChange={(v) => setLyrics({ rotateX: v })} />
-            <NumberSlider label="Y 旋转" value={lyricStyle.rotateY ?? 0} min={-180} max={180} step={1} onChange={(v) => setLyrics({ rotateY: v })} />
-            <NumberSlider label="Z 旋转" value={lyricStyle.rotateZ ?? 0} min={-180} max={180} step={1} onChange={(v) => setLyrics({ rotateZ: v })} />
-            <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>X=上下翻、Y=左右翻、Z=平面旋转（透视纵深）。</div>
-
+            <NumberSlider label="平面旋转" value={lyricStyle.rotateZ ?? 0} min={-180} max={180} step={1} onChange={(v) => setLyrics({ rotateZ: v })} />
+            {/* 透视轴旋转见下方「3D 层变换」 */}
             {/* 6. 字颜色 */}
             <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>字颜色</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
@@ -296,6 +300,71 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
             <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-faint)' }}>
               该剪辑类型暂无可编辑参数（「视频循环」支持素材/缩放/位置，「单次播放」仅关联音乐）
             </div>
+          </div>
+        )}
+
+        {showLayer3D && (
+          <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #2a2a2a' }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>3D 透视变换（四角）</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <input
+                type="checkbox"
+                id="clip-l3d"
+                checked={layer3d.enabled === true}
+                onChange={(e) => {
+                  // 首次启用时写入默认四角（=内容盒自身，恒等），避免 corners 为空导致回退
+                  if (e.target.checked) {
+                    setLayer3D({ enabled: true, corners: layer3d.corners ?? defaultLayer3D().corners })
+                  } else {
+                    setLayer3D({ enabled: false })
+                  }
+                }}
+                style={{ accentColor: '#19a8ff' }}
+              />
+              <label htmlFor="clip-l3d" style={{ fontSize: 12, color: '#bbb' }}>启用四角透视</label>
+            </div>
+            {layer3d.enabled === true && (() => {
+              const corners = layer3d.corners ?? defaultLayer3D().corners
+              const labels = ['左上', '右上', '右下', '左下']
+              const setCorner = (i: number, axis: 'x' | 'y', v: number): void => {
+                const next = corners.map((p) => ({ ...p })) as typeof corners
+                next[i][axis] = v
+                setLayer3D({ corners: next })
+              }
+              return (
+                <>
+                  <div style={{ fontSize: 11, color: '#888', lineHeight: 1.5, marginBottom: 8 }}>
+                    四角坐标相对「内容盒子」：默认 (0,0)(1,0)(1,1)(0,1) = 不扭曲。
+                    移动内容（位置/缩放）时四角自动跟随，<b style={{ color: '#9ad' }}>形状严格锁定</b>。
+                    也可直接在预览里拖拽绿点。
+                  </div>
+                  {corners.map((p, i) => (
+                    <div key={i} style={{ marginBottom: 6 }}>
+                      <div style={{ fontSize: 11, color: '#9ad', marginBottom: 2 }}>{labels[i]}</div>
+                      <NumberSlider label={`  X`} value={p.x} min={-1} max={2} step={0.005} onChange={(v) => setCorner(i, 'x', v)} />
+                      <NumberSlider label={`  Y`} value={p.y} min={-1} max={2} step={0.005} onChange={(v) => setCorner(i, 'y', v)} />
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setLayer3D({ corners: defaultLayer3D().corners })}
+                    style={{
+                      marginTop: 6,
+                      width: '100%',
+                      padding: '5px 8px',
+                      fontSize: 12,
+                      color: '#ccc',
+                      background: '#2a2a2a',
+                      border: '1px solid #3a3a3a',
+                      borderRadius: 4,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    重置四角
+                  </button>
+                </>
+              )
+            })()}
           </div>
         )}
       </div>

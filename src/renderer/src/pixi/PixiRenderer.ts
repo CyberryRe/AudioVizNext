@@ -27,7 +27,7 @@ import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 import type { PresetImage, PresetMeta } from '../presets/types'
 import { mapBlurRadius } from '../presets/drawers/gaussianBlur'
 import { findFollowCircle } from '../presets/followCircle'
-import { resolveLayer3D, affineAt, isLayer3DActive, planPerspectiveGrid, offsetResolvedLayer3D, layer3DClipOffset, type Layer3DStyle, type ResolvedLayer3D } from './layer3d'
+import { resolveLayer3D, affineAt, isLayer3DActive, planPerspectiveGrid, type Layer3DStyle, type ResolvedLayer3D } from './layer3d'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
 interface Layer {
@@ -112,6 +112,8 @@ export class PixiRenderer {
   private imageTextures = new Map<string, Texture>()
   /** 3D 透视网格（四角投影，近大远小）；key = clip id */
   private layer3dMeshes = new Map<string, Mesh>()
+  /** 媒体层当前帧的内容盒子（stage 像素，含中心 x/y 与宽高）——四角 3D HUD 用；key = clip id */
+  private mediaBoxes = new Map<string, { x: number; y: number; w: number; h: number }>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
   private _videoShown = new Set<string>()
   /** 音频分析数据（可视化预设用；由 Monitor 计算后 setAudioData 传入） */
@@ -355,8 +357,7 @@ export class PixiRenderer {
           if (sp.texture !== tex) sp.texture = tex
           sp.alpha = l.opacity
           sp.zIndex = l.z
-          const fo = layer3DClipOffset(l.layer3d, project.stage, 'preset', l.transform, l.params)
-          this.applySpriteBox3D(sp, l.id, 0, 0, project.stage.width, project.stage.height, l.layer3d, project.stage, false, l.opacity, fo.dx, fo.dy)
+          this.applySpriteBox3D(sp, l.id, 0, 0, project.stage.width, project.stage.height, l.layer3d, project.stage, false, l.opacity)
         } else {
           sp.visible = false
           const meshHide = this.layer3dMeshes.get(l.id)
@@ -415,12 +416,10 @@ export class PixiRenderer {
           // 纯布局函数 mediaBox（layout.ts）负责计算：媒体固定铺满画框高、只水平居中，
           // 宽按源宽高比自然得出。预览与导出共用同一函数 → 像素一致。详见 mediaBox 注释。
           const mb = mediaBox(sp.texture.width, sp.texture.height, l.transform, project.stage)
+          this.mediaBoxes.set(l.id, { x: mb.x, y: mb.y, w: mb.width, h: mb.height })
           sp.alpha = l.opacity
           sp.zIndex = l.z
-          // 媒体中心已含 transform：轴/VP 跟随盒心相对 stage 中心的位移
-          const fdx = mb.x - project.stage.width / 2
-          const fdy = mb.y - project.stage.height / 2
-          this.applySpriteBox3D(sp, l.id, mb.x, mb.y, mb.width, mb.height, l.layer3d, project.stage, true, l.opacity, fdx, fdy)
+          this.applySpriteBox3D(sp, l.id, mb.x, mb.y, mb.width, mb.height, l.layer3d, project.stage, true, l.opacity)
         } else {
           // 纹理未就绪：隐藏精灵与可能的 3D mesh
           sp.visible = false
@@ -499,10 +498,10 @@ export class PixiRenderer {
 
   /** 音频分析数据（可视化预设的驱动信号；由 Monitor 计算后传入） */
   /**
-   * 把精灵摆到 stage 上的盒子；启用 layer3d 时改用 **细分投影网格**（真透视曲面）。
+   * 把精灵摆到 stage 上的盒子；启用 layer3d 时改用 **四角单应性 + 细分网格**。
    *
-   * ⚠ 用 16×16 细分而非 4 角 quad：`s = focal/(focal+z)` 是非线性投影，只投影 4 个角
-   * 会在三角形内部线性插值 → 画面被折成两个平面（旋转越大折痕越明显）。
+   * ⚠ 用 16×16 细分而非 4 角 quad：单应性在四边形内部是非线性映射，只投影 4 个角
+   * 会在线性插值下把画面折成两个平面（旧「轴旋转+消失点」模型的折痕）。
    * ⚠ 本方法负责 visible/alpha：3D 时 sprite 隐藏、mesh 显示，调用方不要再写 sp.visible=true。
    */
   private applySpriteBox3D(
@@ -515,12 +514,12 @@ export class PixiRenderer {
     layer3d: Layer3DStyle | undefined,
     stage: { width: number; height: number },
     centerAnchor: boolean,
-    opacity: number,
-    /** 额外偏移：让轴/VP 跟随 Clip 位移（相对 stage 中心） */
-    followDx = 0,
-    followDy = 0
+    opacity: number
   ): void {
-    const cfg = offsetResolvedLayer3D(resolveLayer3D(layer3d, stage), followDx, followDy)
+    const boxX0 = centerAnchor ? x - w / 2 : x
+    const boxY0 = centerAnchor ? y - h / 2 : y
+    // 源矩形 = 内容盒（四角相对它归一化）→ 内容移动时四角自动跟随，形状严格锁定
+    const cfg = resolveLayer3D(layer3d, stage, { x: boxX0, y: boxY0, w, h })
     const tw = Math.max(1, sp.texture?.width || w)
     const th = Math.max(1, sp.texture?.height || h)
     const sx = w / tw
@@ -545,9 +544,7 @@ export class PixiRenderer {
     }
 
     // 真透视曲面：16×16 细分网格（逐顶点投影，消除折痕）
-    const boxX = centerAnchor ? x - w / 2 : x
-    const boxY = centerAnchor ? y - h / 2 : y
-    const grid = planPerspectiveGrid({ x: boxX, y: boxY, w, h }, cfg, LAYER3D_MESH_SEG)
+    const grid = planPerspectiveGrid({ x: boxX0, y: boxY0, w, h }, cfg, LAYER3D_MESH_SEG)
     let mesh = this.layer3dMeshes.get(clipId)
     const needRebuild = !mesh || mesh.texture !== sp.texture ||
       mesh.geometry.getBuffer('aPosition')?.data?.length !== grid.positions.length
@@ -590,6 +587,19 @@ export class PixiRenderer {
       console.warn('[PixiRenderer] 截图失败:', (e as Error)?.message)
       return null
     }
+  }
+
+  /**
+   * 某 clip 当前帧的「内容盒子」（stage 像素）——四角 3D 编辑 HUD 用。
+   * 与渲染严格同源：媒体层用渲染时记下的 mediaBox，预设/文本层为整幅画幅。
+   * 返回 null 表示该 clip 当前帧不可见/无盒子。
+   */
+  layerSourceBox(clipId: string, project: Project): { x: number; y: number; w: number; h: number } | null {
+    const mb = this.mediaBoxes.get(clipId)
+    if (mb) return { x: mb.x - mb.w / 2, y: mb.y - mb.h / 2, w: mb.w, h: mb.h }
+    if (this.textLayers.has(clipId)) return { x: 0, y: 0, w: project.stage.width, h: project.stage.height }
+    if (this.sprites.has(clipId)) return { x: 0, y: 0, w: project.stage.width, h: project.stage.height }
+    return null
   }
 
   /**
@@ -950,11 +960,9 @@ export class PixiRenderer {
       s,
       project
     )
+    // 文本层：源矩形取整幅画幅（与预设层统一语义）；行在 stage 空间按 H 逐行投影
     const cfg = resolveLayer3D(l.layer3d, project.stage)
     const use3d = isLayer3DActive(l.layer3d) && cfg.enabled
-    // ⚠ 文本层不做「轴跟随」：行的投影输入点本身就用**绝对 stage 坐标**(tb.x+lx, tb.y+ly)，
-    //   轴也必须是绝对画幅坐标，两者才同一参照系。若在这里平移轴，输入点却仍是绝对值 →
-    //   内容相对轴的距离失真 → 透视形状漂移（与媒体/预设层同一类 BUG）。
     const l3off = cfg
     // 层容器：未做 3D 时沿用 layout 位置/旋转；3D 时改在 stage 空间逐行投影
     if (use3d) {
@@ -1066,6 +1074,9 @@ export class PixiRenderer {
     }
     for (const [id, tl] of this.textLayers) {
       if (!live.has(id)) { tl.root.destroy(); this.textLayers.delete(id) }
+    }
+    for (const id of [...this.mediaBoxes.keys()]) {
+      if (!live.has(id)) this.mediaBoxes.delete(id)
     }
     // 预设层：回收离屏画布与纹理
     for (const [id, rec] of this._presetRenders) {

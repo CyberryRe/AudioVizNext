@@ -554,6 +554,8 @@ export default function App(): React.JSX.Element {
             isPlaying={isPlaying}
             onPlay={setIsPlaying}
             onSeek={setPlayheadFrame}
+            selectedClipId={selectedClipId}
+            onUpdateClip={handleUpdateClipParams}
           />
         </section>
 
