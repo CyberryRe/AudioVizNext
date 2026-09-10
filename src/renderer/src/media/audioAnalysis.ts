@@ -133,7 +133,11 @@ export function waveValue(data: PresetAudioData | null | undefined, frame: numbe
   return data.wave[f * data.waveSamples + idx]
 }
 
-/** 频谱取值：index/count 映射到该帧频谱 bin，gamma 低端增益（默认 1.3，与旧项目一致） */
+/**
+ * 频谱取值：index/count 映射到该帧频谱 bin，gamma 低端增益（默认 1.3，与旧项目一致）。
+ * ⚠ bin 间必须**线性插值**：对数频段在高频每 bin 跨的 Hz 很宽，若用 floor 取整，
+ * 横向等距采样会踩出「锯齿/台阶」副线（用户报的高频锯齿根因）。
+ */
 export function freqValue(
   data: PresetAudioData | null | undefined,
   frame: number,
@@ -143,8 +147,16 @@ export function freqValue(
 ): number {
   if (!data || !data.freq.length || count <= 0) return 0
   const f = Math.max(0, Math.min(data.frames - 1, Math.round(frame)))
-  const idx = Math.max(0, Math.min(data.freqBins - 1, Math.floor((index / count) * (data.freqBins - 1))))
-  return Math.pow(Math.max(0, Math.min(1, data.freq[f * data.freqBins + idx])), gamma)
+  const bins = data.freqBins
+  const x = Math.max(0, Math.min(bins - 1, (index / count) * (bins - 1)))
+  const i0 = Math.floor(x)
+  const i1 = Math.min(bins - 1, i0 + 1)
+  const t = x - i0
+  const base = f * bins
+  const a = data.freq[base + i0]
+  const b = data.freq[base + i1]
+  const v = a + (b - a) * t
+  return Math.pow(Math.max(0, Math.min(1, v)), gamma)
 }
 
 /** 某帧电平（越界 → 0.25 静息值） */

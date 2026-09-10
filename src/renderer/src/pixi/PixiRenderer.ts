@@ -11,7 +11,7 @@
  * 说明：Mask（输出画幅）与音频发声不属于 Pixi 视觉层，
  *  Mask 由外层 DOM 叠线框/暗角，音频由 <audio> 元素发声。
  */
-import { Application, Container, Sprite, Text, Assets, Texture, ImageSource, BlurFilter, Rectangle, RenderTexture, ColorMatrixFilter, type TextStyleFontWeight } from 'pixi.js'
+import { Application, Container, Sprite, Text, Texture, ImageSource, BlurFilter, Rectangle, RenderTexture, ColorMatrixFilter, type TextStyleFontWeight } from 'pixi.js'
 // CSP 不允许 unsafe-eval 时，需引入 unsafe-eval 模块做 side-effect：
 // 它覆盖渲染器的 _unsafeEvalCheck 并用避免 eval 的 polyfill 替代（Electron/Chrome 扩展等严格 CSP 环境）
 import 'pixi.js/unsafe-eval'
@@ -25,6 +25,7 @@ import { paramAt } from '../presets/keyframes'
 import { num as numParam } from '../presets/types'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 import type { PresetImage, PresetMeta } from '../presets/types'
+import { mapBlurRadius } from '../presets/drawers/gaussianBlur'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
 interface Layer {
@@ -43,14 +44,29 @@ interface Layer {
   /** 关键帧轨道与 clip 内相对进度（调整层/预设求值用） */
   keyframes?: import('../presets/keyframes').KeyframeTracks
   tRel?: number
+  /** clip.type==='image'：强制走图片管线（不靠扩展名猜，blob/编码路径也能命中） */
+  isImage?: boolean
 }
 
 const STAGE = { width: 1920, height: 1080 }
 
-/** 该 src 是否为图片（按扩展名/前缀判断；决定走 Assets 图片管线 vs 视频纹理管线） */
+/**
+ * 该 src 是否为图片（按扩展名/前缀判断；决定走图片管线 vs 视频纹理管线）。
+ * ⚠ 本地素材是 `avn-file://${encodeURIComponent(path)}`，扩展名在解码后的路径末尾，
+ * 直接对编码串做正则仍常见，但 Windows 路径编码后更稳妥先 decode 再测。
+ */
 function looksLikeImage(src: string): boolean {
-  const low = src.toLowerCase()
-  return /\.(png|jpe?g|gif|webp|bmp|svg)(\?|#|$)/.test(low) || low.startsWith('data:image')
+  if (!src) return false
+  if (src.startsWith('data:image')) return true
+  let low = src.toLowerCase()
+  if (src.startsWith('avn-file://')) {
+    try {
+      low = decodeURIComponent(src.slice('avn-file://'.length)).toLowerCase()
+    } catch {
+      /* 保留原串 */
+    }
+  }
+  return /\.(png|jpe?g|gif|webp|bmp|svg)(\?|#|$)/.test(low)
 }
 
 /** 一行歌词的渲染槽（karaoke 滚动：当前句±N 行，每行独立 Text + 辉光副本） */
@@ -83,8 +99,10 @@ export class PixiRenderer {
   private videoEls = new Map<string, HTMLVideoElement>()
   // 每个视频元素当前应停靠/播放的目标源秒（避免每帧重复 seek 造成卡顿）
   private videoTargetSec = new Map<string, number>()
-  // 图片异步加载去重：key = img:src → Promise
-  private imageLoading = new Map<string, Promise<unknown>>()
+  // 图片异步加载去重：src → Promise（与导出 loadImageBitmaps 同路径：fetch+createImageBitmap）
+  private imageLoading = new Map<string, Promise<void>>()
+  // 图片纹理缓存：src → Texture（自管，不走 Assets——Assets 对 avn-file:// 自定义协议不稳）
+  private imageTextures = new Map<string, Texture>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
   private _videoShown = new Set<string>()
   /** 音频分析数据（可视化预设用；由 Monitor 计算后 setAudioData 传入） */
@@ -341,10 +359,9 @@ export class PixiRenderer {
 
       if (l.src) {
         // 媒体层（视频/图片）。视频源可被媒体代理换成转码代理(avn 本地文件)；图片原样走 Assets。
-        const isImage = looksLikeImage(l.src)
+        const isImage = !!(l.isImage || looksLikeImage(l.src))
         // 解码路径一律用原始 clip src(l.src，非代理)：解码会话按原始源建(demux 原始文件)，
         // 用代理查会 miss→回退破代理 <video>。非解码兜底才用 effectiveVideoSrc(代理更稳)。
-        const src = isImage ? l.src : l.src
         const proxyEff = isImage ? l.src : effectiveVideoSrc(l.src)
         const isVideo = !isImage
         let sp = this.sprites.get(l.id)
@@ -360,7 +377,7 @@ export class PixiRenderer {
         // 视频帧同步：把视频元素当作时间轴的"奴隶"，跟随目标源秒（帧→秒映射见 syncVideo 注释），
         // 绝不让它脱离时间轴自行循环播放。用 proxyEff(代理比原始更稳，Chromium 原生解码更可靠)。
         if (isVideo) this.syncVideo(proxyEff, l.sourceFrame, fps)
-        const tex = this.textureFor(proxyEff)
+        const tex = this.textureFor(proxyEff, isImage)
         if (tex && sp.texture !== tex) sp.texture = tex
         // 就绪判定只认像素尺寸（v8 中 Texture 没有 `.valid` 属性；source resize 后 width/height 即真实像素数）
         const tReady = sp.texture && sp.texture.width >= 1 && sp.texture.height >= 1
@@ -461,7 +478,8 @@ export class PixiRenderer {
     return {
       id: c.id, isLyric: false, z: c.zIndex, src: c.src, opacity: c.opacity,
       sourceFrame: c.sourceFrame, transform: c.transform, content: '',
-      presetId: c.presetId, params: c.params, keyframes: c.keyframes, tRel: c.tRel
+      presetId: c.presetId, params: c.params, keyframes: c.keyframes, tRel: c.tRel,
+      isImage: c.type === 'image'
     }
   }
 
@@ -505,7 +523,8 @@ export class PixiRenderer {
     const w = project.stage.width
     const h = project.stage.height
     const tRel = l.tRel ?? 0
-    const radius = paramAt(l.params, l.keyframes, 'radius', tRel, 24)
+    // 与导出 drawer 同一套 mapBlurRadius：大半径压缩到有效上限，避免环状伪影 / 预览导出不一致
+    const radius = mapBlurRadius(paramAt(l.params, l.keyframes, 'radius', tRel, 24))
     const strength = paramAt(l.params, l.keyframes, 'strength', tRel, 1)
     const darken = numParam(l.params ?? {}, meta, 'darken')
     const saturation = numParam(l.params ?? {}, meta, 'saturation')
@@ -520,8 +539,9 @@ export class PixiRenderer {
     if (!this._adjustRT || this._adjustRT.width !== w || this._adjustRT.height !== h) {
       this._adjustSprite?.destroy()
       this._adjustRT?.destroy(true)
+      // RT 必须不透明清成黑：透明 clear 会让 BlurFilter 把「画布外/透明边」糊进画面 → 边缘渐变
       this._adjustRT = RenderTexture.create({ width: w, height: h })
-      this._adjustFilter = new BlurFilter({ strength: 8, quality: 4 })
+      this._adjustFilter = new BlurFilter({ strength: 8, quality: 8 })
       this._adjustColor = new ColorMatrixFilter()
       this._adjustSprite = new Sprite(this._adjustRT)
       this._adjustSprite.anchor.set(0, 0)
@@ -538,15 +558,24 @@ export class PixiRenderer {
     above.forEach((o) => { o.visible = false })
     sprite.visible = false
     try {
-      this.app.renderer.render({ container: this.root!, target: rt, clear: true })
+      // 先用不透明黑清屏，再渲染之下内容——消除透明边缘被 blur 放大的「覆盖不够/边缘渐变」
+      this.app.renderer.render({
+        container: this.root!,
+        target: rt,
+        clear: true,
+        clearColor: 0x000000
+      })
     } catch (e) {
       console.warn('[PixiRenderer] 调整层渲染失败:', (e as Error)?.message)
     } finally {
       above.forEach((o, i) => { o.visible = prevVisible[i] })
     }
 
-    // 2) 模糊精灵叠回：BlurFilter(strength=radius) + 强度作 alpha
+    // 2) 模糊精灵叠回：BlurFilter(strength=有效半径) + 强度作 alpha
+    //    quality 拉高，减轻大 strength 时的环状伪影
     this._adjustFilter!.strength = radius
+    this._adjustFilter!.quality = radius > 16 ? 16 : radius > 8 ? 8 : 4
+    this._adjustFilter!.padding = Math.min(Math.ceil(radius * 2.5), 96)
     this._adjustColor!.reset()
     if (saturation > 0.001) this._adjustColor!.saturate(saturation * 0.6, false)
     if (darken > 0.001) this._adjustColor!.brightness(1 - darken, false)
@@ -554,8 +583,13 @@ export class PixiRenderer {
       ? (darken > 0.001 || saturation > 0.001 ? [this._adjustFilter!, this._adjustColor!] : [this._adjustFilter!])
       : (darken > 0.001 || saturation > 0.001 ? [this._adjustColor!] : [])
     sprite.texture = rt
-    sprite.width = w
-    sprite.height = h
+    // 轻微 overscan：把 blur 边缘软边裁出画幅，保证整屏覆盖（约 pad/min 边长，肉眼几乎不可见）
+    const over = Math.min(0.04, radius / Math.min(w, h))
+    const ow = w * (1 + over * 2)
+    const oh = h * (1 + over * 2)
+    sprite.width = ow
+    sprite.height = oh
+    sprite.position.set(-(ow - w) / 2, -(oh - h) / 2)
     sprite.alpha = Math.min(1, Math.max(0, strength)) * l.opacity
     sprite.zIndex = l.z
     sprite.visible = true
@@ -570,7 +604,7 @@ export class PixiRenderer {
 
   /** 取某 src 的可用图片源（供预设 drawer 的 drawImage 使用；未就绪返回 null） */
   private presetImageSource(src: string): PresetImage | null {
-    const tex = this.textureFor(src)
+    const tex = this.textureFor(src, true)
     const res = tex?.source?.resource as unknown as PresetImage | undefined
     if (!res || typeof res !== 'object') return null
     const w = Number((res as { width?: number }).width ?? 0)
@@ -631,19 +665,18 @@ export class PixiRenderer {
     return rec.tex
   }
 
-  /** 获取/复用纹理（视频返回 video 元素纹理） */
-  private textureFor(src: string): Texture | null {    if (!src) return null
-    if (looksLikeImage(src)) {
-      // 图片：懒加载到 Assets 缓存（blob:/本地路径首次 load，之后复用）
-      try {
-        const existing = Assets.get(src)
-        if (existing) return existing
-        // 异步加载，加载完成前返回 null（下一帧自动出现）
-        this.loadImage(src).catch(() => {})
-        return null
-      } catch {
-        return null
+  /** 获取/复用纹理（视频返回 video 元素纹理；图片走自管缓存） */
+  private textureFor(src: string, forceImage = false): Texture | null {
+    if (!src) return null
+    if (forceImage || looksLikeImage(src)) {
+      // 与导出 loadImageBitmaps 同路径：fetch + createImageBitmap。
+      // Assets.load 对 avn-file:// 自定义协议不稳（CORS/Image 解码），曾致「导出有图、预览全无」。
+      const existing = this.imageTextures.get(src)
+      if (existing && existing.width >= 1 && existing.height >= 1) return existing
+      if (!this.imageLoading.has(src)) {
+        void this.loadImage(src)
       }
+      return existing && existing.width >= 1 && existing.height >= 1 ? existing : null
     }
     // 视频：复用 <video> 元素作为纹理源
     let el = this.videoEls.get(src)
@@ -706,17 +739,39 @@ export class PixiRenderer {
     return tex
   }
 
-  /** 异步加载图片纹理到 Assets 缓存（带去重） */
-  private async loadImage(src: string): Promise<void> {
-    const key = `img:${src}`
-    if (this.imageLoading.has(key)) {
-      // 已有在途加载 → 等它完成即可（返回值不是本函数的语义）
-      await this.imageLoading.get(key)
-      return
-    }
-    const p = Assets.load(src).then((t) => { this.imageLoading.delete(key); return t })
-    this.imageLoading.set(key, p)
-    await p
+  /**
+   * 异步加载图片纹理（带去重）。路径与导出 Worker 的 loadImageBitmaps 一致：
+   * `fetch(src)` → blob → `createImageBitmap` → Pixi `ImageSource`/`Texture`。
+   * 自定义协议 avn-file:// 已由主进程返回 ACAO:*，CSP connect-src 也放行。
+   */
+  private loadImage(src: string): Promise<void> {
+    const cached = this.imageLoading.get(src)
+    if (cached) return cached
+    const p = (async () => {
+      try {
+        const res = await fetch(src)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const bitmap = await createImageBitmap(await res.blob())
+        // 覆盖同 src 旧纹理（重导同一路径时避免泄漏）
+        const prev = this.imageTextures.get(src)
+        if (prev) {
+          try { prev.destroy(true) } catch { /* 忽略 */ }
+        }
+        const source = new ImageSource({ resource: bitmap, width: bitmap.width, height: bitmap.height })
+        this.imageTextures.set(src, new Texture({ source }))
+      } catch (e) {
+        console.error('[PixiRenderer] image load failed:', src.slice(0, 80), (e as Error)?.message)
+      } finally {
+        this.imageLoading.delete(src)
+      }
+      // 纹理就绪后立刻补一帧：否则下一 rAF 可能因「帧/工程未变且无 async」判 dirty=false，
+      // 精灵停留在 visible=false（图片永不出现）。
+      if (this._latestProject) {
+        this.render(this._latestFrame, this._latestProject, this._latestFps)
+      }
+    })()
+    this.imageLoading.set(src, p)
+    return p
   }
 
   /** 回收某个视频源的元素与纹理（换代理/清理时用），并从全局 Texture 缓存移除 */
@@ -906,6 +961,9 @@ export class PixiRenderer {
     this.textLayers.clear()
     for (const rec of this._presetRenders.values()) { try { rec.tex.destroy(true) } catch { /* 忽略 */ } }
     this._presetRenders.clear()
+    for (const tex of this.imageTextures.values()) { try { tex.destroy(true) } catch { /* 忽略 */ } }
+    this.imageTextures.clear()
+    this.imageLoading.clear()
     if (this.app) {
       // ⚠ 绝不能 releaseGlobalResources：`TexturePool`/`CanvasPool`/`BigPool` 是 **模块级单例**，
       // 跨所有 Application(预览+导出)共享。若用 destroy(true,true)/destroy({releaseGlobalResources:true})，

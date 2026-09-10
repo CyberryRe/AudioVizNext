@@ -11,7 +11,7 @@
   "adjustKind": "blur",
   "durationFrames": 150,
   "color": "#4a6a8a",
-  "desc": "调整层：对下方所有轨道已合成的画面做高斯模糊（强度/半径可打关键帧）。",
+  "desc": "调整层：对下方所有轨道已合成的画面做全屏高斯模糊（强度/半径可打关键帧；半径已做有效值压缩，避免大半径环状伪影）。",
   "params": [
     { "key": "strength", "label": "模糊强度", "type": "number", "group": "模糊", "min": 0, "max": 1, "step": 0.01, "default": 1, "percent": true, "keyframe": true },
     { "key": "radius", "label": "模糊半径", "type": "number", "group": "模糊", "min": 0, "max": 160, "step": 1, "default": 24, "unit": "px", "keyframe": true },

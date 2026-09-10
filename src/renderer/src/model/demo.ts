@@ -106,8 +106,7 @@ export function createEffectCategories(): EffectCategory[] {
         {
           id: 'tpl-video-loop', name: '视频循环', kind: 'video', clipType: 'video', durationFrames: 30 * 5, color: '#0b5eaa',
           desc: '循环视频，可关联素材并设置缩放/位置', transform: defaultTransform()
-        },
-        { id: 'tpl-video-transform', name: '视频变换', kind: 'video', clipType: 'video', durationFrames: 30 * 5, color: '#0b5eaa' }
+        }
       ]
     },
     {

@@ -3,7 +3,8 @@
  * 运行：npm test
  */
 import {
-  evaluateKeyframes, paramAt, setKeyframe, removeKeyframeNear, hasKeyframeNear, isValidKeyframes, KEYFRAME_EPS
+  evaluateKeyframes, paramAt, setKeyframe, removeKeyframeNear, hasKeyframeNear, isValidKeyframes, KEYFRAME_EPS,
+  setKeyframeEase, easeProgress
 } from '../src/renderer/src/presets/keyframes.ts'
 
 let pass = 0
@@ -90,11 +91,39 @@ t('isValidKeyframes：合法/非法', () => {
   ok(isValidKeyframes(undefined), 'undefined 合法')
   ok(isValidKeyframes({ a: [] }), '空轨道合法')
   ok(isValidKeyframes({ a: [{ t: 0, v: 1 }, { t: 1, v: 2 }] }), '升序合法')
+  ok(isValidKeyframes({ a: [{ t: 0, v: 1, ease: 'ease' }, { t: 1, v: 2 }] }), '带 ease 合法')
   ok(!isValidKeyframes({ a: [{ t: 1, v: 1 }, { t: 0, v: 2 }] }), '降序应非法')
   ok(!isValidKeyframes({ a: [{ t: 0 }] }), '缺 v 应非法')
   ok(!isValidKeyframes({ a: [{ t: 2, v: 1 }] }), 't 越界应非法')
+  ok(!isValidKeyframes({ a: [{ t: 0, v: 1, ease: 'nope' }] }), '非法 ease 应非法')
   ok(!isValidKeyframes({ a: 5 }), '非数组应非法')
   ok(!isValidKeyframes([]), '顶层数组应非法')
+})
+
+console.log('== 缓动 ==')
+t('easeProgress 各模式', () => {
+  eq(easeProgress('linear', 0.5), 0.5)
+  eq(easeProgress('hold', 0.9), 0)
+  close(easeProgress('easeIn', 0.5), 0.25, 1e-9)
+  close(easeProgress('easeOut', 0.5), 0.75, 1e-9)
+  close(easeProgress('ease', 0.5), 0.5, 1e-9)
+  ok(easeProgress('ease', 0.25) < 0.25, 'ease 在前半段慢于线性')
+  ok(easeProgress('ease', 0.75) > 0.75, 'ease 在后半段快于线性')
+})
+t('evaluateKeyframes 使用左端 ease', () => {
+  const track = [{ t: 0, v: 0, ease: 'easeIn' }, { t: 1, v: 100 }]
+  close(evaluateKeyframes(track, 0.5), 25, 1e-9)
+})
+t('setKeyframe 替换时保留 ease', () => {
+  let track = setKeyframe(undefined, 0, 0, 'easeOut')
+  track = setKeyframe(track, 0, 10)
+  eq(track[0].ease, 'easeOut')
+  eq(track[0].v, 10)
+})
+t('setKeyframeEase 最近点', () => {
+  let track = setKeyframe(setKeyframe(undefined, 0, 0), 1, 1)
+  track = setKeyframeEase(track, 0.02, 'ease')
+  eq(track[0].ease, 'ease')
 })
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`)

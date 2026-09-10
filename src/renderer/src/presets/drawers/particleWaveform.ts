@@ -72,11 +72,29 @@ export function drawParticleWaveform(
   ctx.shadowBlur = 0
 
   // ---- 频谱副线（谐波感） ----
+  // freqValue 已做 bin 间线性插值；再在横轴上做 3 点滑动平均，抹掉对数高频段的台阶/锯齿。
+  const specN = 256
+  const spec = new Float32Array(specN)
+  for (let i = 0; i < specN; i++) {
+    spec[i] = (freqValue(audio, frame, i, specN) - 0.5) * 2
+  }
+  const specS = new Float32Array(specN)
+  for (let i = 0; i < specN; i++) {
+    const a = spec[Math.max(0, i - 1)]
+    const b = spec[i]
+    const c = spec[Math.min(specN - 1, i + 1)]
+    specS[i] = (a + b * 2 + c) * 0.25
+  }
   ctx.beginPath()
   ctx.moveTo(-W / 2, 0)
-  for (let x = -W / 2; x <= W / 2; x += 4) {
+  const stepX = 3
+  for (let x = -W / 2; x <= W / 2; x += stepX) {
     const t = (x + W / 2) / W
-    const v = (freqValue(audio, frame, Math.floor(t * 1023), 1024) - 0.5) * 2 * amp * 0.35
+    const fi = t * (specN - 1)
+    const i0 = Math.floor(fi)
+    const i1 = Math.min(specN - 1, i0 + 1)
+    const ft = fi - i0
+    const v = (specS[i0] + (specS[i1] - specS[i0]) * ft) * amp * 0.35
     ctx.lineTo(x, v)
   }
   ctx.lineWidth = 1.2
@@ -86,16 +104,17 @@ export function drawParticleWaveform(
   ctx.globalAlpha = env.opacity
 
   // ---- 沿波喷射的粒子（确定性） ----
+  // ⚠ 子采样必须按**绝对粒子 id** 稳定判定。若用 (p-p0)%step，p0 每帧 +1 会换一整套粒子 → 闪烁。
   const maxLife = 2.0
   if (audio && audio.spawnPrefix.length > 1) {
     const prefix = audio.spawnPrefix
     const p0 = prefix[Math.max(0, frame - Math.ceil(maxLife * fps))] - 1
     const p1 = prefix[Math.min(audio.frames, frame + 1)]
     if (p1 > 0 && p1 > p0) {
-      const nAlive = Math.max(1, particleCount)
-      const step = Math.max(1, Math.round((p1 - p0) / nAlive))
+      // particleCount 20..400 → 稳定保留密度；窗口内发射量随电平变化，用 hash 阈值而非 step
+      const density = Math.min(1, Math.max(0.05, particleCount / 80))
       for (let p = Math.max(0, p0); p < p1; p++) {
-        if ((p - p0) % step !== 0) continue
+        if (hash(p * 7) > density) continue
         const bf = birthFrameOf(audio, p, frame)
         const age = time - bf / fps
         if (age <= 0 || age > maxLife) continue
@@ -108,12 +127,14 @@ export function drawParticleWaveform(
         const damp = Math.pow(0.99, age * 60)
         const x = x0 + vx * age * damp
         const y = y0 + vy * age + 0.5 * gravity * age * age
-        const alpha = 1 - age / maxLife
-        // 略大于参考实现（1.5→2.2 基数）：真实素材背景多为高动态游戏画面，粒子太小会被吃掉
+        // 出生淡入 + 寿命淡出：避免粒子「啪」地弹出/消失造成的闪烁感
+        const fadeIn = Math.min(1, age / 0.12)
+        const alpha = (1 - age / maxLife) * fadeIn
+        if (alpha <= 0.02) continue
         const size = (2.2 + hash(p * 23) * 3.5 * (0.5 + level)) * (0.55 + alpha * 0.45)
         const c = mixColor(colorA, colorB, hash(p * 29))
 
-        if (particleGlow > 0.01) {
+        if (particleGlow > 0.01 && size > 1.2) {
           ctx.shadowColor = c
           ctx.shadowBlur = 8 * particleGlow
         }
