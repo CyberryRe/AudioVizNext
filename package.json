@@ -1,16 +1,16 @@
-{
+﻿{
   "name": "audioviznext",
   "version": "0.1.0",
   "description": "AudioVizNext — 专业音频可视化工具（Electron + Vite + WebGL）",
   "main": "./out/main/index.js",
-  "author": "AudioVizNext",
-  "license": "MIT",
+  "author": "CyberryRe",
+  "license": "AGPL-3.0-or-later",
   "private": true,
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "typecheck": "tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+        "typecheck": "tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test:model": "node --experimental-strip-types test/model.test.mjs",
     "test:avnpre": "node --experimental-strip-types test/avnpre.test.mjs",
     "test:keyframes": "node --experimental-strip-types test/keyframes.test.mjs",

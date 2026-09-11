@@ -1,0 +1,36 @@
+AudioVizNext 随包分发的 FFmpeg 组件说明（第三方许可证合规）
+================================================================
+
+组件
+----
+  bin/ffmpeg.exe , bin/ffprobe.exe
+  版本：ffmpeg 8.0.1-essentials_build（www.gyan.dev），2025 年构建
+  libavutil 60.8.100 / libavcodec 62.11.100 / libavformat 62.3.100 / libavfilter 11.4.100
+  构建工具链：gcc 15.2.0（MSYS2）
+  关键编译开关：--enable-gpl --enable-version3 --enable-static（含 libx264/libx265/libvpx/… 等 GPL 组件）
+
+许可证
+------
+  该二进制以 GNU General Public License version 3（GPLv3）分发（因启用了 --enable-gpl 与 --enable-version3）。
+  完整许可证文本见本目录下的 GPL-3.0.txt（亦可从 https://www.gnu.org/licenses/gpl-3.0.txt 获取）。
+
+  说明：AudioVizNext 本身以 MIT 许可发布。它**不链接** ffmpeg，而是以独立进程方式调用其命令行
+  （spawn ffmpeg/ffprobe），因此 AudioVizNext 自身不是 GPL 软件的衍生作品；但本安装包
+  **聚合并分发了** GPLv3 程序，故必须随附上述许可证文本与源码获取方式，且不得对 GPL 组件
+  附加额外限制。本说明即为此目的提供。
+
+对应源码（GPLv3 §6 要求的"对应源代码"）
+--------------------------------------
+  1) FFmpeg 8.0.1 官方源码：https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
+     （亦可 git clone https://git.ffmpeg.org/ffmpeg.git 并检出标签 n8.0.1）
+  2) 本二进制的构建脚本/补丁/依赖版本清单由构建方 gyan.dev 公布：
+     https://www.gyan.dev/ffmpeg/builds/  （页面内含 build scripts 与 build 信息）
+  3) 需要我方提供的源码副本或书面要约，可通过项目仓库的 Issue 索取：
+     https://github.com/CyberryRe/AudioVizNext/issues
+
+  该二进制未做任何修改（原样分发）。若你自行替换为其他版本的 ffmpeg/ffprobe，请同时替换本说明。
+
+其它第三方组件
+--------------
+  Electron / Chromium：随包已有 LICENSE.electron.txt 与 LICENSES.chromium.html（见安装目录）。
+  npm 生产依赖（PixiJS、React、mediabunny 等）：见同目录 THIRD-PARTY-NOTICES.md。
