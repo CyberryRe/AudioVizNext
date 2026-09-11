@@ -91,6 +91,51 @@ const api = {
     ipcRenderer.invoke('avs:mbWrite', outPath, data, position),
   /** mediabunny 导出：关闭文件 */
   mbEnd: (outPath: string): Promise<boolean> => ipcRenderer.invoke('avs:mbEnd', outPath),
+  /**
+   * 数据目录（userData：preferences / presets / MediaCache / logs）可配置。
+   * 改完**重启生效**；迁移可选 none/copy/move。
+   */
+  dataDir: {
+    /** 当前数据目录 + 出厂默认 + 各条目占用 */
+    info: (): Promise<{
+      dir: string
+      defaultDir: string
+      source: 'flag' | 'config' | 'default'
+      overridden: boolean
+      configPath: string
+      sizes: { name: string; bytes: number }[]
+    }> => ipcRenderer.invoke('avs:dataDir:info'),
+    /** 弹目录选择框并应用（返回是否成功/已取消） */
+    choose: (migrate: 'none' | 'copy' | 'move'): Promise<{ ok: boolean; canceled?: boolean; error?: string; migrated?: string[]; errors?: string[] }> =>
+      ipcRenderer.invoke('avs:dataDir:choose', migrate),
+    /** 直接指定目录（不做对话框） */
+    set: (dir: string, migrate: 'none' | 'copy' | 'move'): Promise<{ ok: boolean; error?: string; migrated?: string[]; errors?: string[] }> =>
+      ipcRenderer.invoke('avs:dataDir:set', dir, migrate),
+    /** 恢复出厂默认目录（配置清除，重启生效） */
+    reset: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('avs:dataDir:reset'),
+    /** 在文件管理器里打开数据目录 */
+    reveal: (dir?: string): Promise<string> => ipcRenderer.invoke('avs:dataDir:reveal', dir),
+    /** 立即重启应用（让数据目录/GPU 偏好生效） */
+    relaunch: (): Promise<boolean> => ipcRenderer.invoke('avs:app:relaunch')
+  },
+  /** 关于 / 开源许可 */
+  app: {
+    about: (): Promise<{
+      name: string
+      version: string
+      electron: string
+      chrome: string
+      node: string
+      licensesDir: string
+      noticesFile: string | null
+      license: string
+      copyright: string
+      sourceUrl: string
+    }> => ipcRenderer.invoke('avs:app:about'),
+    /** 打开第三方许可清单（没有则打开所在目录） */
+    openLicenses: (): Promise<{ ok: boolean; error?: string; dir: string; target: string }> =>
+      ipcRenderer.invoke('avs:app:openLicenses')
+  },
   mediaCache
 }
 

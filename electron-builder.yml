@@ -1,0 +1,76 @@
+# electron-builder 打包配置（Windows NSIS 安装包）
+#
+# 产物：release/AudioVizNext-Setup-<version>.exe（版本取自 package.json，当前 0.1.0）
+# 用法：npm run dist      （= electron-vite build + electron-builder --win）
+#
+# 关于"给用户选择"：
+#   - 安装目录可选（nsis.allowToChangeInstallationDirectory）
+#   - 默认按用户安装（perMachine: false）→ 不需要管理员权限；允许提升权限(allowElevation)
+#   - 卸载**不删**数据（deleteAppDataOnUninstall: false）
+#   - 应用内「首选项 → 数据目录」可改 userData（预设/视频缓存/日志）位置，支持搬迁
+appId: com.audioviznext.app
+productName: AudioVizNext
+copyright: Copyright © 2026 AudioVizNext
+
+directories:
+  output: release
+  buildResources: build
+
+# 只装运行需要的东西：主进程/预加载/渲染层产物 + package.json。
+# 生产依赖由 electron-builder 自动带上（主进程用 externalizeDepsPlugin，未打进 bundle）。
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+
+# 内嵌 ffmpeg/ffprobe（媒体缓存转码用）→ 解包到 resources/bin，
+# 主进程 mediaCache.resolveBin() 会优先从这里找（也支持 AVS_FFMPEG_PATH 覆盖）。
+# 同时把第三方许可证文本一起发出去（GPLv3 要求随包附许可证 + 源码获取方式）。
+extraResources:
+  - from: bin
+    to: bin
+    filter:
+      - '**/*'
+  - from: resources/licenses
+    to: licenses
+    filter:
+      - '**/*'
+
+asar: true
+npmRebuild: false
+publish: null
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icon.ico
+  #
+  # —— 代码签名（拿到证书后取消注释；两条路线二选一，详见 .github/RELEASE-NOTES-TEMPLATE.md）——
+  #
+  # 路线 A：Azure Trusted Signing（微软托管证书，$9.99/月起，官方支持"个人开发者"档；
+  #   需通过 Identity Validation，且注意地区支持与可能的 Entra ID 额外许可）：
+  # azureSignOptions:
+  #   publisherName: CyberryRe                     # 必须与证书主体一致
+  #   endpoint: https://<region>.codesigning.azure.net
+  #   codeSigningAccountName: <账户名>
+  #   certificateProfileName: <证书配置文件>
+  #
+  # 路线 B：传统 OV/EV 证书（CA 现在强制私钥在硬件令牌/云 HSM 里；无公司实体通常申请不到）：
+  # certificateFile: resources/cert/audioviznext.pfx
+  # certificatePassword: ${env.CSC_KEY_PASSWORD}   # 不要把密码写进仓库
+  #
+  # 路线 C：开源项目免费签名 → SignPath Foundation（见 README/Release 说明），走 CI 出签名产物。
+
+nsis:
+  oneClick: false
+  # perMachine 故意不设 → 安装向导会给「仅为我安装 / 为所有用户安装」选项（后者自动请求管理员权限）
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AudioVizNext
+  # 卸载**不删**用户数据（预设/视频缓存/日志）；数据目录还可能被用户改到别处
+  deleteAppDataOnUninstall: false
+  artifactName: ${productName}-Setup-${version}.${ext}

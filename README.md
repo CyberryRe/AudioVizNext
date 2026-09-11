@@ -59,7 +59,26 @@ docs/             文档
 - [音频算法 API](docs/audio-algorithms.md)
 - [导出测试台](test/e2e/README.md)
 
-## 依赖许可
+## 许可证
+
+本项目以 **GNU Affero General Public License v3.0 或更高版本（AGPL-3.0-or-later）** 发布，
+版权归 `Copyright (c) 2026 CyberryRe`；许可证全文见 [LICENSE](LICENSE)。
+
+你可以自由使用、修改、分发，但**必须遵守 AGPL-3.0**：
+
+- 分发修改版（或通过网络向用户提供服务，§13）时，必须以同一许可证提供**完整对应源码**，
+  并保留版权声明与许可证文本；
+- 项目名称、图标等标识**不随许可证授权**（保留商标权）；
+- 需要闭源/商业授权请与作者联系（贡献者需签署贡献者协议，见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
+
+对应源码：<https://github.com/CyberryRe/AudioVizNext>
+
+### 依赖许可
+
+随包分发的第三方组件（FFmpeg/FFprobe 为 GPLv3、Electron/Chromium、各 npm 生产依赖及其许可证原文）
+汇总在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)；安装目录 `resources/licenses/` 下有同一份
+（应用内：**文件 → 首选项… → 关于 → 开源许可**）。
 
 - **mediabunny** — MPL-2.0（仅作为依赖使用，不修改其源码）
 - PixiJS / React / Electron — MIT
+- **FFmpeg / FFprobe** — GPL-3.0（独立进程调用，未链接；源码获取方式见 `resources/licenses/FFMPEG-NOTICE.txt`）
