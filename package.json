@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "audioviznext",
   "version": "0.1.0",
   "description": "AudioVizNext — 专业音频可视化工具（Electron + Vite + WebGL）",
@@ -10,7 +10,12 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-        "typecheck": "tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "dist": "npm run licenses && electron-vite build && electron-builder --win",
+    "dist:dir": "electron-vite build && electron-builder --win --dir",
+    "dist:hash": "node scripts/dist-hash.mjs",
+    "licenses": "node scripts/gen-licenses.mjs",
+    "icon": "node scripts/make-icon.mjs",
+    "typecheck": "tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test:model": "node --experimental-strip-types test/model.test.mjs",
     "test:avnpre": "node --experimental-strip-types test/avnpre.test.mjs",
     "test:keyframes": "node --experimental-strip-types test/keyframes.test.mjs",
@@ -26,6 +31,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
     "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "typescript": "^5.6.0",
     "vite": "^7.0.0"
