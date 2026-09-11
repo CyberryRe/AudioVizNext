@@ -131,7 +131,16 @@ type PresetDrawer = (
 | `image` | image 类绑定图 |
 | `images` | 参数引用的图片 Map |
 | `assets` | 包内资源 URL Map |
-| `followCircle` | 同帧圆形图片几何 `{x,y,radius,spinRad}` 或 null（环形可视化跟随用） |
+| `followCircle` | 同帧圆形图片几何 `{x,y,radius,spinRad,box,layer3d}` 或 null（环形可视化跟随用） |
+| `followProject` | **跟随必用**：`(x,y) => {x,y}`，把 stage 坐标投到圆形所贴的那个 3D 面上。圆形没开 3D / 未跟随时为 undefined（退回恒等） |
+
+> **跟随圆形必须逐顶点过 `env.followProject`**：宿主只保证"圆"被正确投影，跟随方（环形柱等）
+> 若仍用 `ctx.translate/rotate` 直接画，就会留在画幅平面上 → 看起来"没跟随到同一个面"。
+> 直线段在单应性下仍是直线，所以把轮廓的**每个点**投一遍即可（圆角采样点也一样）。
+
+> **贴 3D 面时画布会出血**：层选了 3D 附着面后，宿主给你的画布比画幅更大（覆盖"画幅在该面上的原像"，
+> 上限每边 0.5 画幅），并把 `ctx` 平移到画幅原点——你仍按 `env.width/height`（= 画幅）作画，
+> 但**画幅之外的笔触不再被裁掉**，会被一起投影到那个面上。所以不要假设"超出画幅一定看不见"。
 
 ### 硬性要求
 
@@ -198,8 +207,13 @@ type PresetDrawer = (
 }
 ```
 
-仓库内完整示例：`plugins/spectrum-bars.avnpre`、`plugins/radial-bars.avnpre`  
-（改源后执行 `node scripts/make-demo-presets.mjs` 重新生成）。
+仓库内完整示例（`node scripts/make-demo-presets.mjs` 生成）：
+- `plugins/spectrum-bars.avnpre` —— **脚本实现**示例（包内自带 JS）  
+- `plugins/radial-bars.avnpre` —— **引用内置 drawer** 示例（数据包；声明直接取自内置
+  `presets/visualizations/radial-bars/preset.json`，实现随 app 编译 → 内置版与分发包不会漂移）
+
+> `radial-bars`（环形频谱柱）本身已是**内置预设**，不需要导入即可在「可视化」分类里用；
+> 上面的 `.avnpre` 只用于把同样的声明分发到别的机器/工程。
 
 ---
 
