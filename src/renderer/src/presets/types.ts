@@ -140,13 +140,13 @@ export interface PresetRenderEnv {
    */
   followCircle?: FollowCircle | null
   /**
-   * 跟随圆形时，把 stage 坐标映射进「圆形图片的 3D 透视」的投影函数。
+   * 跟随圆形时，把 stage 坐标映射进「圆形图片所贴的那个 3D 面」的投影函数。
    *
-   * = `projectStagePoint(x, y, resolveLayer3D(followCircle.layer3d, stage, followCircle.box))`
-   * 的预解析版本（由渲染方按被跟随圆形的盒子+layer3d 构造）。未跟随 / 圆形未启用 3D 时为 undefined
+   * = `projectStagePoint(x, y, resolveLayer3D(followCircle.layer3d, stage, box3d, followCircle.box))`
+   * 的预解析版本（由渲染方按被跟随圆形的盒子+附着面构造）。未跟随 / 圆形未启用 3D 时为 undefined
    * → 调用方退回恒等（直接返回原坐标）。
    *
-   * 为什么放在 env 而不是 drawer 自己算：**内容盒必须是「圆形图片盒」**（四角相对它归一化），
+   * 为什么放在 env 而不是 drawer 自己算：**内容盒必须是「圆形图片盒」**，
    * drawer 只知 stage 尺寸，拿不到该盒；由渲染方（预览 PixiRenderer / 导出 Worker）统一构造
    * → 预览与导出共用同一映射，保证「导出 ≡ 预览」。
    */
@@ -168,10 +168,10 @@ export interface FollowCircle {
   spinRad: number
   /**
    * 圆形图片的内容盒（stage 像素，左上原点）——与 imageShape.baseBox 同口径。
-   * 四角 layer3d 就是相对**这个盒子**归一化的，跟随方必须用同一盒子解析才能对齐。
+   * 贴面时**这个盒子**原样落到圆形所选的那个平面上，跟随方必须用同一盒子+同一长方体解析才能对齐。
    */
   box?: { x: number; y: number; w: number; h: number }
-  /** 圆形 clip 的四角 3D 样式（未启用/未设时为 undefined） */
+  /** 圆形 clip 的 3D 附着面样式（未启用/未设时为 undefined） */
   layer3d?: import('../pixi/layer3d').Layer3DStyle
 }
 

@@ -27,7 +27,7 @@ import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
 import type { PresetImage, PresetMeta } from '../presets/types'
 import { mapBlurRadius } from '../presets/drawers/gaussianBlur'
 import { findFollowCircle, followProjection } from '../presets/followCircle'
-import { resolveLayer3D, affineAt, isLayer3DActive, planPerspectiveGrid, type Layer3DStyle, type ResolvedLayer3D } from './layer3d'
+import { resolveLayer3D, affineAt, isLayer3DActive, planPerspectiveGrid, chooseGridSeg, layer3DDrawBox, type Box3D, type Layer3DStyle, type ResolvedLayer3D } from './layer3d'
 import { decodeGif, isGifBytes, gifFrameIndex } from '../media/gif'
 
 /** 一个可视层条目（按 zIndex 排，渲染顺序=数组顺序，越靠后越在上层） */
@@ -56,8 +56,6 @@ interface Layer {
 }
 
 const STAGE = { width: 1920, height: 1080 }
-/** layer3d 透视网格细分段数（16×16=512 三角形/层，1080p 下开销可忽略，折痕不可见） */
-const LAYER3D_MESH_SEG = 16
 
 /**
  * 该 src 是否为图片（按扩展名/前缀判断；决定走图片管线 vs 视频纹理管线）。
@@ -115,10 +113,12 @@ export class PixiRenderer {
   private imageTextures = new Map<string, Texture>()
   /** GIF 动画帧纹理：src → 每帧一张 Texture（时间轴帧驱动选帧）；静态图不在此表 */
   private gifFrames = new Map<string, Texture[]>()
-  /** 3D 透视网格（四角投影，近大远小）；key = clip id */
+  /** 3D 透视网格（长方体六面投影）；key = clip id */
   private layer3dMeshes = new Map<string, Mesh>()
-  /** 媒体层当前帧的内容盒子（stage 像素，含中心 x/y 与宽高）——四角 3D HUD 用；key = clip id */
+  /** 媒体层当前帧的内容盒子（stage 像素，含中心 x/y 与宽高）——3D 附着面 HUD 用；key = clip id */
   private mediaBoxes = new Map<string, { x: number; y: number; w: number; h: number }>()
+  /** 预设层当前帧的内容盒（stage 像素，左上原点；贴面时含出血）——HUD 用；key = clip id */
+  private presetBoxes = new Map<string, { x: number; y: number; w: number; h: number }>()
   // 视频首帧就绪诊断去重（每 clip id 打印一次 texture READY 状态）
   private _videoShown = new Set<string>()
   /** 音频分析数据（可视化预设用；由 Monitor 计算后 setAudioData 传入） */
@@ -129,7 +129,15 @@ export class PixiRenderer {
   private _adjustFilter: BlurFilter | null = null
   private _adjustColor: ColorMatrixFilter | null = null
   /** 预设层离屏画布缓存：同一 clip 复用一张画布 + 纹理，仅在内容 key 变化时重绘 */
-  private _presetRenders = new Map<string, { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; tex: Texture; key: string }>()
+  private _presetRenders = new Map<string, {
+    canvas: HTMLCanvasElement
+    ctx: CanvasRenderingContext2D
+    tex: Texture
+    key: string
+    /** 画布原点对应的 stage 坐标（贴面时画布比画幅大，原点为负） */
+    originX: number
+    originY: number
+  }>()
   /**
    * 上一帧「跟随圆形且圆形启用 3D」的预设层 id 集合。
    * 这类层的 3D 已由 drawer 逐点施加（env.followProject）→ 外层不再叠加自身 3D（避免双重变形）。
@@ -362,15 +370,18 @@ export class PixiRenderer {
           this.root.addChild(sp)
         }
         sp.zIndex = l.z
-        const tex = this.renderPresetToTexture(l, presetMeta, frame, project, fps)
-        if (tex) {
-          if (sp.texture !== tex) sp.texture = tex
+        const rendered = this.renderPresetToTexture(l, presetMeta, frame, project, fps)
+        if (rendered) {
+          if (sp.texture !== rendered.tex) sp.texture = rendered.tex
           sp.alpha = l.opacity
           sp.zIndex = l.z
           // 跟随圆形且圆形启用 3D：环的 3D 已在 drawer 内逐点施加 → 本层自身 3D 不再叠加
-          // （用户约定「无脑跟随」：跟随态下忽略环形层自己的四角设置，避免双重变形）。
+          // （用户约定「无脑跟随」：跟随态下忽略环形层自己的附着面设置，避免双重变形）。
           const own3d = this._followProjectActive.has(l.id) ? undefined : l.layer3d
-          this.applySpriteBox3D(sp, l.id, 0, 0, project.stage.width, project.stage.height, own3d, project.stage, false, l.opacity)
+          // 画布/内容盒 = 该层需要绘制的区域（贴面时比画幅大）→ 内容不再被"面的矩形"硬切
+          const b = rendered.box
+          this.presetBoxes.set(l.id, b)
+          this.applySpriteBox3D(sp, l.id, b.x, b.y, b.w, b.h, own3d, project.stage, project.box3d, false, l.opacity)
         } else {
           sp.visible = false
           const meshHide = this.layer3dMeshes.get(l.id)
@@ -432,7 +443,7 @@ export class PixiRenderer {
           this.mediaBoxes.set(l.id, { x: mb.x, y: mb.y, w: mb.width, h: mb.height })
           sp.alpha = l.opacity
           sp.zIndex = l.z
-          this.applySpriteBox3D(sp, l.id, mb.x, mb.y, mb.width, mb.height, l.layer3d, project.stage, true, l.opacity)
+          this.applySpriteBox3D(sp, l.id, mb.x, mb.y, mb.width, mb.height, l.layer3d, project.stage, project.box3d, true, l.opacity)
         } else {
           // 纹理未就绪：隐藏精灵与可能的 3D mesh
           sp.visible = false
@@ -511,10 +522,11 @@ export class PixiRenderer {
 
   /** 音频分析数据（可视化预设的驱动信号；由 Monitor 计算后传入） */
   /**
-   * 把精灵摆到 stage 上的盒子；启用 layer3d 时改用 **四角单应性 + 细分网格**。
+   * 把精灵摆到 stage 上的盒子；clip 选了 3D 附着面时改用 **长方体投影 + 细分网格**。
    *
-   * ⚠ 用 16×16 细分而非 4 角 quad：单应性在四边形内部是非线性映射，只投影 4 个角
-   * 会在线性插值下把画面折成两个平面（旧「轴旋转+消失点」模型的折痕）。
+   * ⚠ 用细分网格而非 4 角 quad：单应性在四边形内部是非线性映射，只投影 4 个角
+   * 会在线性插值下把画面折成两个平面（折痕）。段数由 `chooseGridSeg()` 按实际偏差自适应
+   * （导出端调同一函数 → 两端几何逐位一致）。
    * ⚠ 本方法负责 visible/alpha：3D 时 sprite 隐藏、mesh 显示，调用方不要再写 sp.visible=true。
    */
   private applySpriteBox3D(
@@ -526,13 +538,14 @@ export class PixiRenderer {
     h: number,
     layer3d: Layer3DStyle | undefined,
     stage: { width: number; height: number },
+    box3d: Box3D | undefined,
     centerAnchor: boolean,
     opacity: number
   ): void {
     const boxX0 = centerAnchor ? x - w / 2 : x
     const boxY0 = centerAnchor ? y - h / 2 : y
-    // 源矩形 = 内容盒（四角相对它归一化）→ 内容移动时四角自动跟随，形状严格锁定
-    const cfg = resolveLayer3D(layer3d, stage, { x: boxX0, y: boxY0, w, h })
+    // 内容盒 = 源矩形（stage 像素）：贴面时内容盒原样落到该平面上 → 形状锁定、比例不变
+    const cfg = resolveLayer3D(layer3d, stage, box3d, { x: boxX0, y: boxY0, w, h })
     const tw = Math.max(1, sp.texture?.width || w)
     const th = Math.max(1, sp.texture?.height || h)
     const sx = w / tw
@@ -556,8 +569,9 @@ export class PixiRenderer {
       return
     }
 
-    // 真透视曲面：16×16 细分网格（逐顶点投影，消除折痕）
-    const grid = planPerspectiveGrid({ x: boxX0, y: boxY0, w, h }, cfg, LAYER3D_MESH_SEG)
+    // 真透视曲面：自适应细分网格（逐顶点投影，消除折痕）
+    const seg = chooseGridSeg({ x: boxX0, y: boxY0, w, h }, cfg)
+    const grid = planPerspectiveGrid({ x: boxX0, y: boxY0, w, h }, cfg, seg)
     let mesh = this.layer3dMeshes.get(clipId)
     const needRebuild = !mesh || mesh.texture !== sp.texture ||
       mesh.geometry.getBuffer('aPosition')?.data?.length !== grid.positions.length
@@ -565,6 +579,8 @@ export class PixiRenderer {
       if (mesh) { mesh.destroy(); this.layer3dMeshes.delete(clipId) }
       const geo = new MeshGeometry({ positions: grid.positions, uvs: grid.uvs, indices: grid.indices })
       mesh = new Mesh({ geometry: geo, texture: sp.texture })
+      // 网格顶点绝不能取整到像素中心：细密格子在强透视下会被取整成退化三角形 → 画面出现裂痕
+      mesh.roundPixels = false
       this.root!.addChild(mesh)
       this.layer3dMeshes.set(clipId, mesh)
     } else {
@@ -603,11 +619,13 @@ export class PixiRenderer {
   }
 
   /**
-   * 某 clip 当前帧的「内容盒子」（stage 像素）——四角 3D 编辑 HUD 用。
-   * 与渲染严格同源：媒体层用渲染时记下的 mediaBox，预设/文本层为整幅画幅。
-   * 返回 null 表示该 clip 当前帧不可见/无盒子。
+   * 某 clip 当前帧的「内容盒子」（stage 像素，左上原点）——3D 附着面 HUD 用。
+   * 与渲染严格同源：媒体层用渲染时记下的 mediaBox；预设层用**实际开出的画布盒**（贴面时含出血）；
+   * 文本层为整幅画幅。返回 null 表示该 clip 当前帧不可见/无盒子。
    */
   layerSourceBox(clipId: string, project: Project): { x: number; y: number; w: number; h: number } | null {
+    const pb = this.presetBoxes.get(clipId)
+    if (pb) return { ...pb }
     const mb = this.mediaBoxes.get(clipId)
     if (mb) return { x: mb.x - mb.w / 2, y: mb.y - mb.h / 2, w: mb.w, h: mb.h }
     if (this.textLayers.has(clipId)) return { x: 0, y: 0, w: project.stage.width, h: project.stage.height }
@@ -723,24 +741,22 @@ export class PixiRenderer {
   }
 
   /**
-   * 把预设层画到离屏 canvas 并返回纹理。
+   * 把预设层画到离屏 canvas 并返回纹理 + 该纹理覆盖的 stage 矩形。
    * 与导出走**同一个 drawer**（`presets/registry.drawPreset`），因此预览与导出像素一致；
    * 只有内容 key（帧/参数/尺寸/图片就绪）变化时才重绘，避免每帧无谓重画。
+   *
+   * ⚠ 画布尺寸 = `layer3DDrawBox`（贴面时比画幅大）：drawer 仍以**画幅坐标系**作画，
+   *   ctx 先 translate 到画布内的画幅原点 → 超出画幅的笔触不再被 canvas 裁掉。
    */
-  private renderPresetToTexture(l: Layer, meta: PresetMeta, frame: number, project: Project, fps: number): Texture | null {
+  private renderPresetToTexture(
+    l: Layer,
+    meta: PresetMeta,
+    frame: number,
+    project: Project,
+    fps: number
+  ): { tex: Texture; box: { x: number; y: number; w: number; h: number } } | null {
     const w = project.stage.width
     const h = project.stage.height
-    let rec = this._presetRenders.get(l.id)
-    if (!rec || rec.canvas.width !== w || rec.canvas.height !== h) {
-      if (rec) { try { rec.tex.destroy(true) } catch { /* 忽略 */ } }
-      const canvas = document.createElement('canvas')
-      canvas.width = w
-      canvas.height = h
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return null
-      rec = { canvas, ctx, tex: Texture.from(canvas), key: '' }
-      this._presetRenders.set(l.id, rec)
-    }
 
     const image = l.src ? this.presetImageSource(l.src) : null
     const images = new Map<string, PresetImage>()
@@ -753,7 +769,6 @@ export class PixiRenderer {
       }
     }
 
-    const key = `${l.presetId}|${JSON.stringify(l.params ?? {})}|${frame}|${w}x${h}|${image ? 'i' : '-'}|${images.size}`
     // 圆形图片跟随：环形柱状图等需要；随帧/工程变化
     const followCircle = findFollowCircle(project, frame, (src) => {
       const t = this.imageTextures.get(src)
@@ -770,22 +785,49 @@ export class PixiRenderer {
     const declaresFollow = meta.params.some((p) => p.key === 'followCircle')
     const isFollower = !l.src && declaresFollow && boolParam(l.params ?? {}, meta, 'followCircle')
     const followProject = followCircle && isFollower
-      ? followProjection(followCircle, { width: w, height: h })
+      ? followProjection(followCircle, { width: w, height: h }, project.box3d)
       : undefined
     // 记录给外层：该层 3D 已逐点施加 → 别再叠加自身 3D（缓存命中时也要更新，故放在 key 比较之前）
     if (followProject) this._followProjectActive.add(l.id)
     else this._followProjectActive.delete(l.id)
-    // ⚠ 缓存 key 必须含**圆形 3D 的全部定义参数**（盒子 + 四角）：用户拖圆的四角时 x/y/radius 不变，
-    //   仅含这些会让环的渲染结果被旧缓存憋住 → 环不跟随变形。故把 box + layer3d 一并入 key。
+
+    // 本层实际生效的 3D（跟随态下自身 3D 被忽略）→ 决定画布要不要出血
+    const own3d = followProject ? undefined : l.layer3d
+    const box = layer3DDrawBox(own3d, project.stage, project.box3d)
+
+    let rec = this._presetRenders.get(l.id)
+    if (!rec || rec.canvas.width !== box.w || rec.canvas.height !== box.h) {
+      if (rec) { try { rec.tex.destroy(true) } catch { /* 忽略 */ } }
+      const canvas = document.createElement('canvas')
+      canvas.width = box.w
+      canvas.height = box.h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return null
+      rec = { canvas, ctx, tex: Texture.from(canvas), key: '', originX: box.x, originY: box.y }
+      this._presetRenders.set(l.id, rec)
+    }
+    if (rec.originX !== box.x || rec.originY !== box.y) {
+      // 画布原点动了（贴面/换面/深度变化）→ 旧内容失效
+      rec.originX = box.x
+      rec.originY = box.y
+      rec.key = ''
+    }
+
+    const key = `${l.presetId}|${JSON.stringify(l.params ?? {})}|${frame}|${w}x${h}|${box.x},${box.y},${box.w},${box.h}|${image ? 'i' : '-'}|${images.size}`
+    // ⚠ 缓存 key 必须含**圆形 3D 的全部定义参数**（盒子 + 附着面）：用户改圆的 3D 面或长方体深度时
+    //   x/y/radius 不变，仅含这些会让环的渲染结果被旧缓存憋住 → 环不跟随变形。故把 box + layer3d 一并入 key。
     const fcKey = followCircle
       ? `${followCircle.x.toFixed(1)},${followCircle.y.toFixed(1)},${followCircle.radius.toFixed(1)},` +
         `${followCircle.box ? `${followCircle.box.x.toFixed(1)},${followCircle.box.y.toFixed(1)},${followCircle.box.w.toFixed(1)},${followCircle.box.h.toFixed(1)}` : '-'},` +
-        `${followProject ? JSON.stringify(followCircle.layer3d?.corners ?? null) : '-'}`
+        `${followProject ? JSON.stringify(followCircle.layer3d ?? null) : '-'},${JSON.stringify(project.box3d ?? null)}`
       : '-'
     const key2 = `${key}|fc:${fcKey}`
-    if (rec.key === key2) return rec.tex
+    if (rec.key === key2) return { tex: rec.tex, box }
 
-    rec.ctx.clearRect(0, 0, w, h)
+    rec.ctx.setTransform(1, 0, 0, 1, 0, 0)
+    rec.ctx.clearRect(0, 0, box.w, box.h)
+    // drawer 以画幅坐标系作画：原点落到画布内的画幅左上角
+    rec.ctx.translate(-box.x, -box.y)
     drawPreset(rec.ctx, meta, {
       width: w,
       height: h,
@@ -805,7 +847,7 @@ export class PixiRenderer {
     }, l.params)
     rec.tex.source.update()
     rec.key = key2
-    return rec.tex
+    return { tex: rec.tex, box }
   }
 
   /** 获取/复用纹理（视频返回 video 元素纹理；图片走自管缓存；GIF 返回对应帧纹理） */
@@ -1030,7 +1072,7 @@ export class PixiRenderer {
       project
     )
     // 文本层：源矩形取整幅画幅（与预设层统一语义）；行在 stage 空间按 H 逐行投影
-    const cfg = resolveLayer3D(l.layer3d, project.stage)
+    const cfg = resolveLayer3D(l.layer3d, project.stage, project.box3d)
     const use3d = isLayer3DActive(l.layer3d) && cfg.enabled
     const l3off = cfg
     // 层容器：未做 3D 时沿用 layout 位置/旋转；3D 时改在 stage 空间逐行投影
@@ -1146,6 +1188,9 @@ export class PixiRenderer {
     }
     for (const id of [...this.mediaBoxes.keys()]) {
       if (!live.has(id)) this.mediaBoxes.delete(id)
+    }
+    for (const id of [...this.presetBoxes.keys()]) {
+      if (!live.has(id)) this.presetBoxes.delete(id)
     }
     // 预设层：回收离屏画布与纹理
     for (const [id, rec] of this._presetRenders) {

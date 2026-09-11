@@ -5,7 +5,7 @@ import { formatTimecode } from '../model/demo'
 import { PixiRenderer } from '../pixi/PixiRenderer'
 import { computeAudioData } from '../media/audioAnalysis'
 import { initAudioBlob, resolvedAudioBlob, useAudioBlobTick } from '../media/audioBlob'
-import { resolveLayer3D, isLayer3DActive, type Pt } from '../pixi/layer3d'
+import { resolveLayer3D, planBoxWireframe, FACE_LABELS, type Pt } from '../pixi/layer3d'
 
 interface MonitorProps {
   project: Project
@@ -13,9 +13,9 @@ interface MonitorProps {
   isPlaying: boolean
   onPlay: (playing: boolean) => void
   onSeek: (frame: number) => void
-  /** 选中 clip（3D 调参时叠加四角编辑 HUD） */
+  /** 选中 clip（叠加 3D 附着面 HUD） */
   selectedClipId?: string | null
-  /** 更新选中 clip（四角拖拽回写 layer3d.corners） */
+  /** 更新选中 clip */
   onUpdateClip?: (clipId: string, patch: Partial<Clip>) => void
 }
 
@@ -324,94 +324,70 @@ export default function Monitor({ project, frame, isPlaying, onPlay, onSeek, sel
               否则会铺满整个预览区、明显大于遮罩且对不齐。 */}
           <div ref={pixiHostRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
           {(() => {
-            if (!selectedClipId) return null
-            let sel: Clip | null = null
-            for (const clips of Object.values(project.clips)) {
-              const c = clips.find((x) => x.id === selectedClipId)
-              if (c) { sel = c; break }
-            }
-            if (!sel?.layer3d || !isLayer3DActive(sel.layer3d)) return null
-            // 源内容盒（stage 像素）——与 PixiRenderer / 导出 Worker 完全同源，HUD 与渲染严格对齐：
-            //  媒体层：渲染时记下的 mediaBox；预设/文本层：整幅画幅。
-            const srcBox = (() => {
-              const fromPixi = pixiRef.current?.layerSourceBox(sel!.id, project)
-              if (fromPixi) return fromPixi
-              // Pixi 未就绪（DOM 兜底）或该层暂无盒子 → 整幅画幅
-              return { x: 0, y: 0, w: project.stage.width, h: project.stage.height }
-            })()
-            const cfg = resolveLayer3D(sel.layer3d, project.stage, srcBox)
-            if (!cfg.enabled) return null
+            // 3D 长方体线框（仅预览叠加，不进导出）：面由同一相机推导，棱严格对齐。
+            if (project.box3d?.showWireframe === false) return null
+            const wire = planBoxWireframe(project.box3d, project.stage)
+            if (!wire) return null
             const sx = maskW / project.stage.width
             const sy = maskH / project.stage.height
-            // 源矩形（内容盒子）轮廓：拖角前的内容范围
-            const srcR = { x: srcBox.x * sx, y: srcBox.y * sy, w: srcBox.w * sx, h: srcBox.h * sy }
-            // 目标四角（stage px → 预览 px）
-            const q = cfg.quad.map((p) => ({ x: p.x * sx, y: p.y * sy }))
-            const cornerPts = q.map((p) => `${p.x},${p.y}`).join(' ')
-            // 四边中点连线（对边是否收敛一眼可见）
-            const mid = (a: Pt, b: Pt): Pt => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
-            const m01 = mid(q[0], q[1])
-            const m23 = mid(q[2], q[3])
-            const m12 = mid(q[1], q[2])
-            const m30 = mid(q[3], q[0])
-            const CORNER_LABELS = ['左上', '右上', '右下', '左下']
+            const SP = (p: Pt): Pt => ({ x: p.x * sx, y: p.y * sy })
+            const poly = (quad: Pt[]): string => quad.map((p) => { const q = SP(p); return `${q.x},${q.y}` }).join(' ')
+            // 选中 clip 的附着面（用于高亮）
+            let sel: Clip | null = null
+            if (selectedClipId) {
+              for (const clips of Object.values(project.clips)) {
+                const c = clips.find((x) => x.id === selectedClipId)
+                if (c) { sel = c; break }
+              }
+            }
+            const selFace = sel && sel.layer3d?.enabled === true ? (sel.layer3d.face ?? null) : null
+            // 选中 clip 的内容盒 → 投影轮廓（= 它实际贴上去的那块矩形）
+            const srcBox = sel
+              ? (pixiRef.current?.layerSourceBox(sel.id, project) ?? { x: 0, y: 0, w: project.stage.width, h: project.stage.height })
+              : null
+            const cfg = sel ? resolveLayer3D(sel.layer3d, project.stage, project.box3d, srcBox ?? undefined) : null
+            const showSel = !!cfg && cfg.enabled
             return (
               <svg
                 width={maskW}
                 height={maskH}
                 style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 30 }}
               >
-                {/* 源内容盒（变换前）虚线 */}
-                <rect
-                  x={srcR.x} y={srcR.y} width={srcR.w} height={srcR.h}
-                  fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth={1} strokeDasharray="5 4"
-                />
-                {/* 目标四边形轮廓（透视后） */}
-                <polygon points={cornerPts} fill="rgba(61,255,160,0.06)" stroke="#3dffa0" strokeWidth={1.8} />
-                {/* 对边中线：收敛到消失点的方向可视化 */}
-                <line x1={m01.x} y1={m01.y} x2={m23.x} y2={m23.y} stroke="#3dffa0" strokeWidth={0.8} strokeDasharray="4 4" opacity={0.5} />
-                <line x1={m12.x} y1={m12.y} x2={m30.x} y2={m30.y} stroke="#3dffa0" strokeWidth={0.8} strokeDasharray="4 4" opacity={0.5} />
-                {/* 四角手柄（可拖拽） */}
-                {q.map((p, i) => (
-                  <g key={i} style={{ pointerEvents: 'all', cursor: 'crosshair' }}>
-                    <circle
-                      cx={p.x} cy={p.y} r={9}
-                      fill="rgba(0,0,0,0.35)" stroke="#3dffa0" strokeWidth={2}
-                      onPointerDown={(e) => {
-                        if (!onUpdateClip) return
-                        e.preventDefault()
-                        e.stopPropagation()
-                        const svg = (e.currentTarget as SVGCircleElement).ownerSVGElement
-                        if (!svg) return
-                        const rect = svg.getBoundingClientRect()
-                        const move = (ev: PointerEvent): void => {
-                          // 预览 px → stage px → 相对源盒归一化
-                          const stx = ((ev.clientX - rect.left) / rect.width) * project.stage.width
-                          const sty = ((ev.clientY - rect.top) / rect.height) * project.stage.height
-                          const nextCorners = cfg.quad.map((qq, k) => {
-                            if (k !== i) return { x: (qq.x - srcBox.x) / (srcBox.w || 1), y: (qq.y - srcBox.y) / (srcBox.h || 1) }
-                            return { x: (stx - srcBox.x) / (srcBox.w || 1), y: (sty - srcBox.y) / (srcBox.h || 1) }
-                          }) as [Pt, Pt, Pt, Pt]
-                          onUpdateClip(sel!.id, { layer3d: { ...(sel!.layer3d ?? {}), corners: nextCorners } })
-                        }
-                        const up = (): void => {
-                          window.removeEventListener('pointermove', move)
-                          window.removeEventListener('pointerup', up)
-                        }
-                        window.addEventListener('pointermove', move)
-                        window.addEventListener('pointerup', up)
-                      }}
+                {/* 12 条棱 */}
+                {wire.edges.map((e, i) => {
+                  const a = SP(e.a)
+                  const b = SP(e.b)
+                  return <line key={`e${i}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="rgba(61,255,160,0.35)" strokeWidth={1} />
+                })}
+                {/* 六个面：选中面高亮填充，其余只描边 */}
+                {wire.faces.map((f) => {
+                  const active = selFace === f.id
+                  return (
+                    <polygon
+                      key={f.id}
+                      points={poly(f.quad)}
+                      fill={active ? 'rgba(61,255,160,0.10)' : 'none'}
+                      stroke={active ? '#3dffa0' : 'rgba(61,255,160,0.22)'}
+                      strokeWidth={active ? 1.6 : 0.8}
+                      strokeDasharray={f.id === 'front' ? '6 4' : undefined}
                     />
-                    <text
-                      x={p.x} y={p.y - 14} fill="#3dffa0" fontSize={10} fontFamily="sans-serif"
-                      textAnchor="middle" style={{ pointerEvents: 'none' }}
-                    >
-                      {CORNER_LABELS[i]}
-                    </text>
-                  </g>
-                ))}
+                  )
+                })}
+                {/* 选中 clip 的内容盒（变换前）虚线 */}
+                {showSel && srcBox && (
+                  <rect
+                    x={srcBox.x * sx} y={srcBox.y * sy} width={srcBox.w * sx} height={srcBox.h * sy}
+                    fill="none" stroke="rgba(255,255,255,0.30)" strokeWidth={1} strokeDasharray="5 4"
+                  />
+                )}
+                {/* 选中 clip 投影后的四边形（它真正占的那块） */}
+                {showSel && cfg && (
+                  <polygon points={poly(cfg.quad)} fill="none" stroke="#ffd166" strokeWidth={1.6} />
+                )}
                 <text x={10} y={16} fill="#3dffa0" fontSize={10} fontFamily="sans-serif">
-                  拖拽四角调整透视（相对内容盒，移动内容形状不变）
+                  {selFace && FACE_LABELS[selFace]
+                    ? `3D 长方体：剪辑贴在「${FACE_LABELS[selFace]}」（黄框 = 实际占位）`
+                    : '3D 长方体线框（在 Clip 面板选择剪辑贴哪个面；深度在 序列设置 里调）'}
                 </text>
               </svg>
             )

@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import type { StageRatio } from '../model/timeline'
+import type { Box3D } from '../pixi/layer3d'
+import { defaultBox3D } from '../pixi/layer3d'
+import NumberSlider from './NumberSlider'
 import PreferencesDialog from './PreferencesDialog'
 
 interface StageConfig {
@@ -14,6 +17,10 @@ interface MenuBarProps {
   onSetStage: (next: StageConfig) => void
   ratios: StageRatio[]
   stageSizeFor: (ratio: number, mainLength: number, orientation?: 'landscape' | 'portrait') => { width: number; height: number }
+  /** 工程级 3D 长方体（透视舞台） */
+  box3d?: Box3D
+  /** 更新 3D 长方体参数（局部 patch） */
+  onSetBox3D?: (patch: Partial<Box3D>) => void
   /** 点「文件>导出」触发（由 App 承接完整导出流程） */
   onExport?: () => void
   /** 点「文件>导入预设…」触发（.avnpre 导入） */
@@ -23,7 +30,7 @@ interface MenuBarProps {
 /** 标准分辨率预设（主边长度） */
 const MAIN_LENGTHS = [720, 1080, 1440, 1920, 2160, 3840]
 
-export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor, onExport, onImportPreset }: MenuBarProps): React.JSX.Element {
+export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor, box3d, onSetBox3D, onExport, onImportPreset }: MenuBarProps): React.JSX.Element {
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const [seqOpen, setSeqOpen] = useState(false)
   const [prefsOpen, setPrefsOpen] = useState(false)
@@ -186,6 +193,61 @@ export default function MenuBar({ stageConfig, onSetStage, ratios, stageSizeFor,
           <div style={{ marginTop: 14, fontSize: 11, color: '#777' }}>
             当前 {stageConfig.width}×{stageConfig.height}（{ratioObj.name}）
           </div>
+
+          {/* —— 3D 长方体（透视舞台）：正对观众，前墙 = 画幅平面 —— */}
+          {(() => {
+            const b = { ...defaultBox3D(), ...(box3d ?? {}) }
+            const set = (patch: Partial<Box3D>): void => onSetBox3D?.(patch)
+            return (
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #3a3a3a' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <input
+                    type="checkbox"
+                    id="seq-box3d"
+                    checked={b.enabled === true}
+                    onChange={(e) => set({ enabled: e.target.checked })}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    style={{ accentColor: '#19a8ff' }}
+                  />
+                  <label htmlFor="seq-box3d" style={{ fontSize: 12, color: '#ccc' }}>启用 3D 长方体舞台</label>
+                </div>
+                <div style={{ fontSize: 11, color: '#888', lineHeight: 1.6, marginBottom: 8 }}>
+                  长方体正对观众，<b style={{ color: '#9ad' }}>前墙 = 画幅平面</b>。
+                  在右侧「效果控件」里给每个剪辑选贴哪个面；盒子只是**透视参考**，
+                  面是无限平面：内容按自己的位置/大小落到面上，超出盒子也照常渲染（只被画幅裁）。
+                </div>
+                <NumberSlider
+                  label="深度"
+                  title="对面（后墙）到前墙的距离（以画幅宽度为单位）：只决定盒子有多深、后墙在哪。贴在「后面」的内容会随之前后移动；贴在侧墙/顶底面的内容位置与它无关"
+                  value={b.depth ?? 0.35}
+                  min={0.05}
+                  max={1.5}
+                  step={0.01}
+                  onChange={(v) => set({ depth: v })}
+                />
+                <NumberSlider
+                  label="相机距离"
+                  title="相机到前墙的距离（以画幅宽度为单位）：越大透视越弱（长焦），越小越广角。侧墙上的图看起来有多扁由它决定"
+                  value={b.camera ?? 1}
+                  min={0.3}
+                  max={3}
+                  step={0.05}
+                  onChange={(v) => set({ camera: v })}
+                />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    id="seq-box3d-wire"
+                    checked={b.showWireframe !== false}
+                    onChange={(e) => set({ showWireframe: e.target.checked })}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    style={{ accentColor: '#19a8ff' }}
+                  />
+                  <label htmlFor="seq-box3d-wire" style={{ fontSize: 12, color: '#bbb' }}>预览显示长方体线框</label>
+                </div>
+              </div>
+            )
+          })()}
         </div>
       )}
 

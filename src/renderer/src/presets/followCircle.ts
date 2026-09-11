@@ -94,19 +94,20 @@ export function findFollowCircle(
 }
 
 /**
- * 构造「把 stage 坐标映射进被跟随圆形剪贴 3D 透视」的投影函数。
+ * 构造「把 stage 坐标映射进被跟随圆形剪贴 3D 面」的投影函数。
  *
- * 内容盒 = 圆形图片的内容盒（四角 layer3d 相对它归一化）；被跟随圆形未启用 3D 或缺少盒信息时
+ * 内容盒 = 圆形图片的内容盒；被跟随圆形未启用 3D（或长方体未启用/面为前面）时
  * 返回 **undefined**（调用方退回恒等，保持旧行为）。
  *
  * 预览（PixiRenderer）与导出（Worker）都调用**这一个函数** → 两端映射逐点一致 → 导出 ≡ 预览。
  */
 export function followProjection(
   follow: FollowCircle | null | undefined,
-  stage: { width: number; height: number }
+  stage: { width: number; height: number },
+  box3d?: import('../pixi/layer3d').Box3D
 ): ((x: number, y: number) => { x: number; y: number }) | undefined {
   if (!follow || !follow.box || !isLayer3DActive(follow.layer3d)) return undefined
-  const cfg = resolveLayer3D(follow.layer3d, stage, follow.box)
+  const cfg = resolveLayer3D(follow.layer3d, stage, box3d, follow.box)
   if (!cfg.enabled) return undefined
   return (x: number, y: number) => {
     const p = projectStagePoint(x, y, cfg)
