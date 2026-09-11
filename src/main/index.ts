@@ -1,6 +1,6 @@
 import { app, shell, BrowserWindow, protocol, ipcMain, dialog } from 'electron'
 import { join, extname } from 'path'
-import { createReadStream, statSync, readFileSync, openSync, closeSync, writeSync, writeFileSync } from 'fs'
+import { createReadStream, statSync, readFileSync, existsSync, openSync, closeSync, writeSync, writeFileSync } from 'fs'
 import { ensureProxy, mediaCacheDir, hasFfmpeg, probeVideo } from './mediaCache'
 import { initFileLog } from './logFile'
 import { verifyVideoIntegrity, compareFrames } from './export'
@@ -8,10 +8,17 @@ import { loadPreferences, savePreferences, type Preferences } from './preference
 import { probeExportDevices, getGpuEnv } from './deviceProbe'
 import { applyWindowsGpuPreference } from './gpuPreference'
 import { listUserPresets, importAvnpreFile, inspectAvnpreFile } from './presets'
+import { applyUserDataOverride, getDataDirInfo, setDataDir, dataDirSizes, type MigrateMode } from './dataDir'
 
 // GPU 开关：强制 ANGLE 用 D3D11。旧项目实测 use-gl=desktop 会让 Chromium 的 D3D11 视频
 // 编码器不可用（WebCodecs 硬编探测全失败），且 GameViewer 虚拟显示器环境对 GPU 后端尤其敏感。
 app.commandLine.appendSwitch('use-angle', 'd3d11')
+
+// **数据目录（userData）可配置**：preferences/presets/MediaCache/logs 都挂在它下面。
+// 必须在任何 app.getPath('userData') 之前生效（下面读首选项、初始化日志都依赖它）。
+const _dataDir = applyUserDataOverride()
+console.log(`[main] 数据目录: ${_dataDir.dir}（来源 ${_dataDir.source}${_dataDir.overridden ? '' : '，默认'}）`)
+
 // 导出设备偏好：多 GPU 混合模式（如关闭独显直连）下强制 Chromium 用独显/核显。
 // 这两个开关只能在 GPU 进程启动前设置，故改偏好需重启生效。
 const _startupPrefs = loadPreferences()
@@ -61,6 +68,12 @@ protocol.registerSchemesAsPrivileged([
 // 崩溃后到 userData/logs/avnext-*.log 回溯全量现场（含 WebGL CONTEXT_LOST / GPU 崩溃）。
 const fileLog = initFileLog()
 console.log(`[main] userData logs dir 就绪: ${fileLog.file}`)
+// 数据目录解析结果再落一次：上面那行早于 initFileLog，只进了 stdout；这行会进日志文件，
+// 便于排查"改了数据目录没反应"（配合 AVS_DATADIR_DEBUG=1 看解析过程）。
+{
+  const d = getDataDirInfo()
+  console.log(`[main] 数据目录: ${d.dir}（来源 ${d.source}${d.overridden ? '' : '，默认'}；默认 ${d.defaultDir}）`)
+}
 
 /** mediabunny 导出：输出路径 → 已打开的文件描述符（StreamTarget 按偏移随机写盘） */
 const mbFds = new Map<string, number>()
@@ -315,6 +328,69 @@ app.whenReady().then(() => {
   // 内置预设在打包时随渲染层 bundle 一起进入应用；这里只管"用户导入"的预设，
   // 落到 userData/presets/<id>/（preset.json + assets/），下次启动自动加载。
   ipcMain.handle('avs:presetList', async () => listUserPresets())
+
+  // ===== 数据目录（userData）可配置 =====
+  ipcMain.handle('avs:dataDir:info', async () => ({
+    ...getDataDirInfo(),
+    sizes: dataDirSizes()
+  }))
+  ipcMain.handle('avs:dataDir:choose', async (e, migrate: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const mode: MigrateMode = migrate === 'copy' || migrate === 'move' ? migrate : 'none'
+    const d = await dialog.showOpenDialog(win!, {
+      title: '选择数据目录（预设 / 视频缓存 / 日志）',
+      properties: ['openDirectory', 'createDirectory'],
+      buttonLabel: '使用此目录'
+    })
+    if (d.canceled || !d.filePaths[0]) return { ok: false, canceled: true, error: '已取消' }
+    return setDataDir(d.filePaths[0], mode)
+  })
+  ipcMain.handle('avs:dataDir:set', async (_e, dir: unknown, migrate: unknown) => {
+    if (typeof dir !== 'string' || !dir.trim()) return { ok: false, error: '目录无效' }
+    const mode: MigrateMode = migrate === 'copy' || migrate === 'move' ? migrate : 'none'
+    return setDataDir(dir, mode)
+  })
+  ipcMain.handle('avs:dataDir:reset', async () => setDataDir(null))
+  ipcMain.handle('avs:dataDir:reveal', async (_e, dir: unknown) => {
+    const target = typeof dir === 'string' && dir.trim() ? dir : getDataDirInfo().dir
+    return shell.openPath(target)
+  })
+  ipcMain.handle('avs:app:relaunch', async () => {
+    app.relaunch()
+    app.exit(0)
+    return true
+  })
+
+  // ===== 关于 / 开源许可 =====
+  // 许可证文本随安装包分发在 resources/licenses/（打包）或 <仓库>/resources/licenses/（开发）。
+  const licensesDir = (): string => app.isPackaged
+    ? join(process.resourcesPath, 'licenses')
+    : join(app.getAppPath(), 'resources', 'licenses')
+  ipcMain.handle('avs:app:about', async () => {
+    const dir = licensesDir()
+    const notices = join(dir, 'THIRD-PARTY-NOTICES.md')
+    return {
+      name: 'AudioVizNext',
+      version: app.getVersion(),
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+      licensesDir: dir,
+      noticesFile: existsSync(notices) ? notices : null,
+      license: 'AGPL-3.0-or-later',
+      copyright: 'Copyright (c) 2026 CyberryRe',
+      // AGPL-3.0 §6/§13：随分发需提供对应源码的获取方式
+      sourceUrl: 'https://github.com/CyberryRe/AudioVizNext'
+    }
+  })
+  /** 打开开源许可（优先打开清单文件，没有就打开目录） */
+  ipcMain.handle('avs:app:openLicenses', async () => {
+    const dir = licensesDir()
+    const notices = join(dir, 'THIRD-PARTY-NOTICES.md')
+    const target = existsSync(notices) ? notices : dir
+    const err = await shell.openPath(target)
+    return { ok: !err, error: err || undefined, dir, target }
+  })
   ipcMain.handle('avs:presetImport', async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     const d = await dialog.showOpenDialog(win!, {
