@@ -212,7 +212,13 @@ export async function refreshUserPresets(): Promise<void> {
     const list = await window.api.presetList()
     for (const raw of list) {
       const meta = normalizeMeta(raw, 'user')
-      if (meta) registry.set(meta.id, meta)
+      if (!meta) continue
+      // 同 id 时**用户预设优先**（允许用户包覆盖内置样式）；但要点出来：
+      // 用户包是快照，内置声明后来改了也不会生效 → 排查"内置改了没反应"时先看这条日志。
+      if (registry.get(meta.id)?.source === 'builtin') {
+        console.warn(`[Preset] 用户预设「${meta.id}」覆盖了同 id 的内置预设（内置更新将不再生效；删除 userData/presets/${meta.id} 可恢复）`)
+      }
+      registry.set(meta.id, meta)
     }
   } catch (e) {
     console.warn('[Preset] 读取用户预设失败:', (e as Error)?.message)
