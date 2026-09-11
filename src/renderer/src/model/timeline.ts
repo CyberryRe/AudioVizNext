@@ -41,6 +41,12 @@ export interface Project {
    * 内容相对 design 的几何不变 → 只裁切/留边，不重算、不乱飞。
    */
   design: { width: number; height: number }
+  /**
+   * 3D 透视舞台：一个正对观众的长方体（前墙 = 画幅平面）。clip 通过 `layer3d.face`
+   * 选择贴在哪个面上；六个面由同一相机推导 → 相邻面公共棱严格重合，透视天然自洽。
+   * 参数语义见 `pixi/layer3d.ts` 的 `Box3D`。缺省/未启用 = 纯 2D。
+   */
+  box3d?: import('../pixi/layer3d').Box3D
   /** 轨道，order 0 = 最上层 = 渲染最前 */
   tracks: Track[]
   /** 每个轨道的 clip 列表，始终按 startFrame 升序、无重叠 */
@@ -112,8 +118,8 @@ export interface Clip {
    */
   keyframes?: import('../presets/keyframes').KeyframeTracks
   /**
-   * 泛用 3D 层变换（四角单应性透视）。视频/图片/文本/可视化均可挂；
-   * 投影数学见 `pixi/layer3d.ts`，预览与导出共用。
+   * 泛用 3D 层变换（把该 clip 贴到 3D 长方体的某个面上）。视频/图片/文本/可视化均可挂；
+   * 投影数学见 `pixi/layer3d.ts`（工程级长方体在 `Project.box3d`），预览与导出共用。
    */
   layer3d?: import('../pixi/layer3d').Layer3DStyle
   /**

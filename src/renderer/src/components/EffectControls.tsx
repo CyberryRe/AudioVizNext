@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import type { Project, Clip, MediaAsset } from '../model/timeline'
 import MediaSlot from './MediaSlot'
+import NumberSlider from './NumberSlider'
 import PresetParamsPanel from './PresetParamsPanel'
 import { getPreset } from '../presets/registry'
-import type { Layer3DStyle } from '../pixi/layer3d'
-import { defaultLayer3D } from '../pixi/layer3d'
+import type { Box3D, FaceId, Layer3DStyle } from '../pixi/layer3d'
+import { FACE_LABELS } from '../pixi/layer3d'
 
 interface EffectControlsProps {
   selectedClipId: string | null
@@ -20,65 +21,6 @@ interface EffectControlsProps {
   onBindAssetToClip: (clipId: string, assetId: string) => void
 }
 
-/** 滑块控件：label + 数值输入 + 拖动改值 */
-function NumberSlider({ label, value, min, max, step, onChange }: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step: number
-  onChange: (v: number) => void
-}): React.JSX.Element {
-  const ref = useRef<HTMLDivElement>(null)
-
-  const startDrag = (e: React.MouseEvent): void => {
-    e.stopPropagation()
-    const el = ref.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
-    const update = (clientX: number): void => {
-      const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
-      const raw = min + ratio * (max - min)
-      onChange(Math.round(raw / step) * step)
-    }
-    update(e.clientX)
-    const move = (ev: MouseEvent): void => update(ev.clientX)
-    const up = (): void => {
-      window.removeEventListener('mousemove', move)
-      window.removeEventListener('mouseup', up)
-    }
-    window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup', up)
-  }
-
-  const pct = ((value - min) / (max - min)) * 100
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '52px 1fr 52px', alignItems: 'center', gap: 8, marginBottom: 9 }}>
-      <span style={{ fontSize: 12, color: '#bbb' }}>{label}</span>
-      <div
-        ref={ref}
-        onMouseDown={startDrag}
-        style={{ height: 12, background: '#111', border: '1px solid #333', borderRadius: 3, position: 'relative', cursor: 'ew-resize' }}
-      >
-        <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: '#2a6fa8', borderRadius: 3 }} />
-        <div style={{ position: 'absolute', left: `calc(${pct}% - 4px)`, top: -3, width: 8, height: 18, background: '#ccc', borderRadius: 2 }} />
-      </div>
-      <input
-        type="number"
-        value={Math.round(value * 100) / 100}
-        step={step}
-        min={min}
-        max={max}
-        onChange={(e) => {
-          const v = Number(e.target.value)
-          if (!Number.isNaN(v)) onChange(Math.max(min, Math.min(max, v)))
-        }}
-        style={{ width: 52, background: '#1d1d1d', border: '1px solid #333', color: '#eee', padding: '3px 5px', fontSize: 11, borderRadius: 3, textAlign: 'right' }}
-      />
-    </div>
-  )
-}
 
 
 /** 左上：效果控件 —— 视频循环 clip 的参数面板（关联素材 / 缩放 / 位置） */
@@ -126,6 +68,8 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
 
   const lyricStyle = selectedClip?.lyrics ?? {}
   const layer3d = selectedClip?.layer3d ?? {}
+  /** 工程级长方体（3D 舞台）；未启用时附着面选择不生效 */
+  const box: Box3D | undefined = project.box3d
   const showLayer3D = !!selectedClip && selectedClip.type !== 'audio'
   const lyricAligns = [
     { v: 'left', label: '左对齐' },
@@ -304,70 +248,49 @@ export default function EffectControls({ selectedClipId, project, getAsset, onUp
           </div>
         )}
 
-        {showLayer3D && (
-          <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #2a2a2a' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>3D 透视变换（四角）</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-              <input
-                type="checkbox"
-                id="clip-l3d"
-                checked={layer3d.enabled === true}
-                onChange={(e) => {
-                  // 首次启用时写入默认四角（=内容盒自身，恒等），避免 corners 为空导致回退
-                  if (e.target.checked) {
-                    setLayer3D({ enabled: true, corners: layer3d.corners ?? defaultLayer3D().corners })
-                  } else {
-                    setLayer3D({ enabled: false })
-                  }
-                }}
-                style={{ accentColor: '#19a8ff' }}
-              />
-              <label htmlFor="clip-l3d" style={{ fontSize: 12, color: '#bbb' }}>启用四角透视</label>
+        {showLayer3D && (() => {
+          // 长方体是否启用决定本区块能否真正生效（参数在 顶部菜单 → 序列设置 → 3D 长方体）
+          const boxEnabled = box?.enabled === true
+          const face: FaceId | 'off' = layer3d.enabled !== true ? 'off' : (layer3d.face ?? 'front')
+          const onPick = (v: FaceId | 'off'): void => {
+            if (v === 'off') setLayer3D({ enabled: false, face: layer3d.face ?? 'front' })
+            else setLayer3D({ enabled: true, face: v })
+          }
+          return (
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #2a2a2a' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>3D 附着面（长方体舞台）</div>
+              <div style={{ fontSize: 11, color: '#888', lineHeight: 1.6, marginBottom: 10 }}>
+                长方体固定正对观众，<b style={{ color: '#9ad' }}>前面 = 画幅平面</b>（等价现在的 2D）。
+                选一个面 = 把该剪辑贴到那个平面上，六个面共用同一台相机 → 透视自洽。
+                <br />
+                <b style={{ color: '#9ad' }}>面是无限平面，不是渲染范围</b>：内容按自己的位置/大小落到面上，
+                超出长方体也照常渲染（只被画幅裁）。左/右/顶/底面用画幅坐标 1:1 当深度
+                （横向/纵向 = 进深方向），所以调「深度」不会挪动或拉扁它们。
+              </div>
+              {!boxEnabled && (
+                <div style={{ fontSize: 11, color: '#d8a94a', lineHeight: 1.5, marginBottom: 8 }}>
+                  ⚠ 3D 长方体当前未启用（序列设置 → 3D 长方体）。未启用时下面的选择不产生任何透视。
+                </div>
+              )}
+              <select
+                value={face}
+                onChange={(e) => onPick(e.target.value as FaceId | 'off')}
+                style={{ width: '100%', background: '#1d1d1d', border: '1px solid #333', color: '#eee', padding: '6px 8px', fontSize: 12, borderRadius: 3 }}
+              >
+                <option value="off">关闭（不透视）</option>
+                <option value="front">前面（= 画幅平面，不变）</option>
+                {(['back', 'left', 'right', 'top', 'bottom'] as FaceId[]).map((f) => (
+                  <option key={f} value={f}>{FACE_LABELS[f]}</option>
+                ))}
+              </select>
+              {face !== 'off' && face !== 'front' && (
+                <div style={{ fontSize: 11, color: '#7fbf7f', marginTop: 6 }}>
+                  已贴在「{FACE_LABELS[face as FaceId]}」：位置/缩放滑杆仍然有效（在面内移动/缩放）。
+                </div>
+              )}
             </div>
-            {layer3d.enabled === true && (() => {
-              const corners = layer3d.corners ?? defaultLayer3D().corners
-              const labels = ['左上', '右上', '右下', '左下']
-              const setCorner = (i: number, axis: 'x' | 'y', v: number): void => {
-                const next = corners.map((p) => ({ ...p })) as typeof corners
-                next[i][axis] = v
-                setLayer3D({ corners: next })
-              }
-              return (
-                <>
-                  <div style={{ fontSize: 11, color: '#888', lineHeight: 1.5, marginBottom: 8 }}>
-                    四角坐标相对「内容盒子」：默认 (0,0)(1,0)(1,1)(0,1) = 不扭曲。
-                    移动内容（位置/缩放）时四角自动跟随，<b style={{ color: '#9ad' }}>形状严格锁定</b>。
-                    也可直接在预览里拖拽绿点。
-                  </div>
-                  {corners.map((p, i) => (
-                    <div key={i} style={{ marginBottom: 6 }}>
-                      <div style={{ fontSize: 11, color: '#9ad', marginBottom: 2 }}>{labels[i]}</div>
-                      <NumberSlider label={`  X`} value={p.x} min={-1} max={2} step={0.005} onChange={(v) => setCorner(i, 'x', v)} />
-                      <NumberSlider label={`  Y`} value={p.y} min={-1} max={2} step={0.005} onChange={(v) => setCorner(i, 'y', v)} />
-                    </div>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => setLayer3D({ corners: defaultLayer3D().corners })}
-                    style={{
-                      marginTop: 6,
-                      width: '100%',
-                      padding: '5px 8px',
-                      fontSize: 12,
-                      color: '#ccc',
-                      background: '#2a2a2a',
-                      border: '1px solid #3a3a3a',
-                      borderRadius: 4,
-                      cursor: 'pointer'
-                    }}
-                  >
-                    重置四角
-                  </button>
-                </>
-              )
-            })()}
-          </div>
-        )}
+          )
+        })()}
       </div>
     </div>
   )

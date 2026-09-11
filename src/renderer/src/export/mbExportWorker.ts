@@ -25,7 +25,7 @@ import { findFollowCircle, followProjection } from '../presets/followCircle'
 import { avnUrl, evenUp, pathFromAvn, type ExportProgress } from './exportTypes'
 import { getPreset, drawPreset, installUserPresetMetas } from '../presets/registry'
 import { levelAt, type PresetAudioData } from '../media/audioAnalysis'
-import { resolveLayer3D, affineAt, isLayer3DActive, projectStagePoint, type ResolvedLayer3D } from '../pixi/layer3d'
+import { resolveLayer3D, isLayer3DActive, planPerspectiveGrid, chooseGridSeg, gridCellDrawRects, layer3DDrawBox, type ResolvedLayer3D } from '../pixi/layer3d'
 import { bool as boolParam, type PresetImage } from '../presets/types'
 
 export interface WorkerAudioMix {
@@ -63,15 +63,25 @@ const log = (line: string): void => post({ type: 'log', line })
 
 let cancelled = false
 
-/** layer3d 透视网格细分段数（与预览端 PixiRenderer.LAYER3D_MESH_SEG 保持一致，保证导出=预览） */
-const LAYER3D_GRID_SEG = 16
+/**
+ * 接缝补偿：相邻格的目标矩形各向外扩这么多 **stage 像素**。
+ * 两个独立成因都靠它解决（详见 `pixi/layer3d.ts` 的 `gridCellDrawRects`）：
+ *  ① 源子矩形边界的双线性采样被 clamp → 采样断裂（源矩形按同比例出血后消失）；
+ *  ② 抗锯齿覆盖率缝：跨接缝的像素被两格各盖一半 → 漏底色（外扩 ≥ 半像素后必被一格完整覆盖）。
+ * 取 0.75 略大于半像素，留浮点/取整余量。
+ */
+const GRID_SEAM_PAD_PX = 0.75
+
+/** 逐格贴图暂存画布（跨帧复用）：网格以 alpha=1 画满后再整体按 opacity 合成 */
+let gridScratch: OffscreenCanvas | null = null
+
 /**
  * 把源图按 layer3d 投影网格逐格贴到目标 2D 上下文。
  *
- * ⚠ 关键：`setTransform` 的基向量已含**全部**缩放（u 基向量 = 投影后格子的一条边）。
- * 因此 drawImage 的目标矩形必须是**单位格 (0,0,1,1)**——基向量会把「1 单位」映射到投影后的格。
- * 若像早期实现那样传 `cellW,cellH`（源空间格子像素），缩放会被重复施加 → 格子叠加错位 → 一团模糊色块。
- * 源矩形按格子像素（`srcCellW/H`）切分，与预览端 Pixi Mesh 的 UV 插值同构。
+ * ⚠ 几何直接取自 `planPerspectiveGrid`（与预览端 Pixi `Mesh` **同一份顶点数组**）→ 两端逐位一致。
+ * ⚠ 每格：`setTransform` 的基向量 = 该格两条投影边（已含全部缩放），目标矩形必须是**单位格**
+ *   （若传 `cellW,cellH` 会把缩放重复施加 → 格子叠加错位 → 一团模糊色块）。
+ * ⚠ 相邻格必须外扩重叠（不裁剪）：见 `GRID_SEAM_PAD_PX`。
  */
 function drawProjectedGrid(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -80,32 +90,82 @@ function drawProjectedGrid(
   cfg: ResolvedLayer3D,
   seg: number
 ): void {
-  const n = Math.max(1, Math.min(64, Math.floor(seg)))
+  const g = planPerspectiveGrid(box, cfg, seg)
+  const n = g.seg
+  const cols = n + 1
   const tw = src.width
   const th = src.height
-  const cellW = box.w / n
-  const cellH = box.h / n
-  const srcCellW = tw / n
-  const srcCellH = th / n
+  const scw = tw / n
+  const sch = th / n
+  const p = g.positions
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
   for (let r = 0; r < n; r++) {
     for (let c = 0; c < n; c++) {
-      const sx = box.x + cellW * c
-      const sy = box.y + cellH * r
-      const p00 = projectStagePoint(sx, sy, cfg)
-      const p10 = projectStagePoint(sx + cellW, sy, cfg)
-      const p01 = projectStagePoint(sx, sy + cellH, cfg)
-      // 基向量 = 投影后该格的两条边（已含全部缩放）；原点 = 投影后左上角
-      const a = p10.x - p00.x
-      const b = p10.y - p00.y
-      const cc = p01.x - p00.x
-      const dd = p01.y - p00.y
+      const i00 = (r * cols + c) * 2
+      const i10 = (r * cols + c + 1) * 2
+      const i01 = ((r + 1) * cols + c) * 2
+      const x00 = p[i00]
+      const y00 = p[i00 + 1]
+      const a = p[i10] - x00
+      const b = p[i10 + 1] - y00
+      const cc = p[i01] - x00
+      const dd = p[i01 + 1] - y00
+      // 目标侧外扩 PAD stage px ⇔ 源侧外扩 PAD * 源格 / 投影格边长（源像素）
+      const bleedX = (GRID_SEAM_PAD_PX * scw) / Math.max(1e-3, Math.hypot(a, b))
+      const bleedY = (GRID_SEAM_PAD_PX * sch) / Math.max(1e-3, Math.hypot(cc, dd))
+      const cell = gridCellDrawRects(c, r, n, tw, th, bleedX, bleedY)
       ctx.save()
-      ctx.setTransform(a, b, cc, dd, p00.x, p00.y)
-      // 目标用单位格 (0..1)：基向量把它映射到投影后的格子（切勿再传 cellW/cellH）
-      ctx.drawImage(src, c * srcCellW, r * srcCellH, srcCellW, srcCellH, 0, 0, 1, 1)
+      // 基向量 = 该格两条投影边（与预览端 Mesh 顶点同源）
+      ctx.setTransform(a, b, cc, dd, x00, y00)
+      ctx.drawImage(src, cell.sx, cell.sy, cell.sw, cell.sh, cell.dx, cell.dy, cell.dw, cell.dh)
       ctx.restore()
     }
   }
+}
+
+/**
+ * 按 opacity 把网格贴到目标上下文。
+ * `opacity < 1` 时先画到暂存画布（alpha=1）再整体合成 —— 否则相邻格接缝处同一像素被两次
+ * 半透明覆盖，会出现比目标更深的网格线。
+ */
+function blitProjectedGrid(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  src: CanvasImageSource & { width: number; height: number },
+  box: { x: number; y: number; w: number; h: number },
+  cfg: ResolvedLayer3D,
+  seg: number,
+  opacity: number,
+  w: number,
+  h: number
+): void {
+  if (opacity >= 0.999) {
+    drawProjectedGrid(ctx, src, box, cfg, seg)
+    return
+  }
+  if (!gridScratch || gridScratch.width !== w || gridScratch.height !== h) {
+    gridScratch = new OffscreenCanvas(w, h)
+  }
+  const sctx = gridScratch.getContext('2d')
+  if (!sctx) {
+    // 兜底：拿不到暂存画布就直接画（网格线比丢内容可接受）
+    const keep = ctx.globalAlpha
+    ctx.globalAlpha = opacity
+    drawProjectedGrid(ctx, src, box, cfg, seg)
+    ctx.globalAlpha = keep
+    return
+  }
+  sctx.setTransform(1, 0, 0, 1, 0, 0)
+  sctx.globalAlpha = 1
+  sctx.clearRect(0, 0, w, h)
+  drawProjectedGrid(sctx, src, box, cfg, seg)
+  const keep = ctx.globalAlpha
+  ctx.globalAlpha = opacity
+  // 逐格贴图会改变换（save/restore 已还原），这里显式归一化，确保暂存画布 1:1 对位
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.drawImage(gridScratch, 0, 0)
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.globalAlpha = keep
 }
 
 // —— 落盘 RPC：Worker 不能调 window.api，改由主线程代写 ——
@@ -184,17 +244,22 @@ function renderFrame(
       //   ② 效果层也可能带 layer3d 但不消费 followProject → 按「预设声明 followCircle 且值为真」判定。
       const declaresFollow = meta.params.some((p) => p.key === 'followCircle')
       const isFollower = l.kind !== 'image' && declaresFollow && boolParam(l.params ?? {}, meta, 'followCircle')
-      const followProject = isFollower ? followProjection(followCircle, { width: w, height: h }) : undefined
-      const l3cfg = resolveLayer3D(l.layer3d, project.stage, { x: 0, y: 0, w, h })
+      const followProject = isFollower ? followProjection(followCircle, { width: w, height: h }, project.box3d) : undefined
+      const l3cfg = resolveLayer3D(l.layer3d, project.stage, project.box3d, { x: 0, y: 0, w, h })
       // 跟随圆形时：环的 3D 已在 drawer 内逐点施加（followProject）→ 该层自身 3D 不再叠加
-      // （用户约定「无脑跟随」：跟随态下忽略环形层自己的四角设置）。
+      // （用户约定「无脑跟随」：跟随态下忽略环形层自己的附着面设置）。
       const use3d = !followProject && isLayer3DActive(l.layer3d) && l3cfg.enabled
       ctx.save()
       if (use3d) {
         // 全幅预设 3D：先整层画到临时画布，再按细分网格逐格贴回（与预览同一投影，无折痕）。
-        const tmp = new OffscreenCanvas(w, h)
+        // ⚠ 临时画布按「该层需要绘制的区域」开（贴面时比画幅大）——drawer 仍在画幅坐标系作画，
+        //   超出画幅的笔触不被 canvas 裁掉 → 不会在"面的矩形边界"处出现硬切边。
+        const gridBox = layer3DDrawBox(l.layer3d, project.stage, project.box3d, { x: 0, y: 0, w, h })
+        const cfg3 = resolveLayer3D(l.layer3d, project.stage, project.box3d, gridBox)
+        const tmp = new OffscreenCanvas(gridBox.w, gridBox.h)
         const tctx = tmp.getContext('2d')
         if (tctx) {
+          tctx.translate(-gridBox.x, -gridBox.y)
           drawPreset(tctx, meta, {
             width: w,
             height: h,
@@ -212,8 +277,7 @@ function renderFrame(
             followCircle,
             followProject
           }, l.params)
-          ctx.globalAlpha = l.opacity
-          drawProjectedGrid(ctx, tmp, { x: 0, y: 0, w, h }, l3cfg, LAYER3D_GRID_SEG)
+          blitProjectedGrid(ctx, tmp, gridBox, cfg3, chooseGridSeg(gridBox, cfg3), l.opacity, w, h)
         }
       } else {
         drawPreset(ctx, meta, {
@@ -243,14 +307,14 @@ function renderFrame(
     if (!src) continue
     const rect = mediaBox(src.width, src.height, l.transform, { width: w, height: h })
     const box = { x: rect.x - rect.width / 2, y: rect.y - rect.height / 2, w: rect.width, h: rect.height }
-    // 四角相对「内容盒子」→ 源矩形随内容移动，形状严格锁定（无需跟随偏移）
-    const m3 = resolveLayer3D(l.layer3d, project.stage, box)
+    // 内容盒 = 源矩形：贴面时原样落到该平面上，形状锁定（无需跟随偏移）
+    const m3 = resolveLayer3D(l.layer3d, project.stage, project.box3d, box)
     ctx.save()
-    ctx.globalAlpha = l.opacity
     if (isLayer3DActive(l.layer3d) && m3.enabled) {
-      // 细分网格透视：与预览端同构（同段数、同投影）→ 无折痕、导出=预览
-      drawProjectedGrid(ctx, src, box, m3, LAYER3D_GRID_SEG)
+      // 细分网格透视：与预览端同一份顶点数组（同段数、同投影）→ 无折痕、导出=预览
+      blitProjectedGrid(ctx, src, box, m3, chooseGridSeg(box, m3), l.opacity, w, h)
     } else {
+      ctx.globalAlpha = l.opacity
       ctx.drawImage(src, rect.x - rect.width / 2, rect.y - rect.height / 2, rect.width, rect.height)
     }
     ctx.restore()

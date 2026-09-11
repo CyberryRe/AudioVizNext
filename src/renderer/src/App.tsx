@@ -32,6 +32,7 @@ import {
 } from './model/timeline'
 import TitleBar from './components/TitleBar'
 import MenuBar from './components/MenuBar'
+import { defaultBox3D, type Box3D } from './pixi/layer3d'
 import EffectControls from './components/EffectControls'
 import Monitor from './components/Monitor'
 import EffectsPanel from './components/EffectsPanel'
@@ -175,6 +176,15 @@ export default function App(): React.JSX.Element {
     setProject((prev) => ({
       ...prev,
       stage: { width: next.width, height: next.height },
+      version: prev.version + 1
+    }))
+  }, [])
+
+  // ===== 3D 长方体（透视舞台）：工程级参数，局部 patch 更新 =====
+  const handleSetBox3D = useCallback((patch: Partial<Box3D>) => {
+    setProject((prev) => ({
+      ...prev,
+      box3d: { ...defaultBox3D(), ...(prev.box3d ?? {}), ...patch },
       version: prev.version + 1
     }))
   }, [])
@@ -527,6 +537,8 @@ export default function App(): React.JSX.Element {
         onSetStage={handleSetStage}
         ratios={STAGE_RATIOS}
         stageSizeFor={stageSizeFor}
+        box3d={project.box3d}
+        onSetBox3D={handleSetBox3D}
         onExport={handleExport}
         onImportPreset={() => { void handleImportPreset() }}
       />
